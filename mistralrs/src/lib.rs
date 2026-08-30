@@ -341,7 +341,9 @@ pub use mistralrs_core::{
 pub use mistralrs_core::{MtpConfig, SpeculativeConfig};
 
 // ========== Device Mapping ==========
-pub use mistralrs_core::{AutoDeviceMapParams, DeviceMapSetting};
+pub use mistralrs_core::{
+    AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
+};
 
 // ========== Topology ==========
 pub use mistralrs_core::{LayerTopology, Topology};

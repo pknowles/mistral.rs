@@ -299,28 +299,52 @@ fn add_cudnn_link_search() {
 }
 
 fn set_git_revision() {
-    let commit = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
+    let git_dir = std::fs::read_to_string(".git")
         .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
+        .and_then(|git_file| {
+            git_file
+                .strip_prefix("gitdir: ")
+                .map(str::trim)
+                .map(std::path::PathBuf::from)
         })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::metadata(".git")
+                .ok()
+                .filter(|metadata| metadata.is_dir())
+                .map(|_| std::path::PathBuf::from(".git"))
+        });
+    let commit = git_dir
+        .as_ref()
+        .and_then(|_| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .ok()
+        })
+        .and_then(|output| output.status.success().then_some(output.stdout))
+        .and_then(|stdout| String::from_utf8(stdout).ok())
+        .map(|revision| revision.trim().to_string())
+        .filter(|revision| !revision.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
-
     println!("cargo:rustc-env=MISTRALRS_GIT_REVISION={commit}");
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+
+    let Some(git_dir) = git_dir else {
+        return;
+    };
+
+    let head_path = git_dir.join("HEAD");
+    if !head_path.is_file() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={}", head_path.display());
+    if let Ok(head) = std::fs::read_to_string(&head_path) {
         if let Some(ref_path) = head.strip_prefix("ref:") {
             let ref_path = ref_path.trim();
             if !ref_path.is_empty() {
-                println!("cargo:rerun-if-changed=.git/{}", ref_path);
+                let ref_path = git_dir.join(ref_path);
+                if ref_path.is_file() {
+                    println!("cargo:rerun-if-changed={}", ref_path.display());
+                }
             }
         }
     }
