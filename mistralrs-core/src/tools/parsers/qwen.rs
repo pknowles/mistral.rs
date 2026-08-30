@@ -265,7 +265,13 @@ fn qwen_xml_args_rule(tool_idx: usize, tool: &Tool, rules: &mut Vec<String>) -> 
 }
 
 fn qwen_xml_generic_rules(tools: &[Tool]) -> &'static str {
-    if tools.iter().any(|tool| tool.function.parameters.is_none()) {
+    if tools.iter().any(|tool| {
+        tool
+            .function
+            .parameters
+            .as_ref()
+            .is_none_or(|parameters| !parameters.get("properties").is_some_and(Value::is_object))
+    }) {
         r#"qwen_xml_generic_function: "<function=" /[a-zA-Z_][a-zA-Z0-9_]*/ ">" "\n"? qwen_xml_generic_params "</function>"
 qwen_xml_generic_params: (qwen_xml_generic_param "\n"?)*
 qwen_xml_generic_param: "<parameter=" /[a-zA-Z_][a-zA-Z0-9_]*/ ">" "\n"? xml_param_value "</parameter>""#
@@ -436,7 +442,6 @@ print(1 < 2)
         assert!(lark.contains("\"<parameter=code>\" \"\\n\"? xml_param_value \"</parameter>\""));
         assert!(!lark.contains("\"\\n</parameter>\""));
     }
-
     #[test]
     fn required_grammar_uses_tokenizer_special_wrappers() {
         let tool = crate::Tool {
@@ -521,5 +526,28 @@ print(1 < 2)
         matcher.consume_token(newline).unwrap();
         assert!(matcher.compute_mask().unwrap().is_allowed(start_token));
         matcher.consume_token(start_token).unwrap();
+    }
+
+    #[test]
+    fn qwen_xml_grammar_defines_generic_parameters_for_an_empty_object_schema() {
+        let parameters: HashMap<String, Value> = serde_json::from_value(json!({
+            "type": "object",
+            "additionalProperties": false
+        }))
+        .unwrap();
+        let tool = crate::Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "roll_attributes".to_string(),
+                description: None,
+                parameters: Some(parameters),
+                strict: Some(true),
+            },
+        };
+
+        let grammar = QwenParser.tool_call_grammar(&[tool], "");
+        let lark = grammar.grammars[0].lark_grammar.as_ref().unwrap();
+        assert!(lark.contains("qwen_xml_args_0: qwen_xml_generic_params"));
+        assert!(lark.contains("qwen_xml_generic_params:"));
     }
 }
