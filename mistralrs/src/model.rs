@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc::{channel, Receiver};
 
 use crate::error::Error as SdkError;
-use crate::{EmbeddingRequest, EmbeddingRequestBuilder, RequestLike, TextMessages};
+use crate::{EmbeddingRequest, EmbeddingRequestBuilder, RequestLike, TextMessages, RequestBuilder};
 
 // Re-export for convenience
 pub use mistralrs_core::{AddModelConfig, ModelStatus, Pipeline, SchedulerConfig};
@@ -1018,6 +1018,33 @@ impl Model {
             None,
         )
         .await
+    }
+
+    /// Tokenize the exact chat request that would be passed to
+    /// [`Self::send_chat_request`]. Unlike [`Self::tokenize`], this accepts a
+    /// [`RequestBuilder`] so prior tool calls and their result identifiers are
+    /// counted with the model's own chat template.
+    pub async fn tokenize_chat_request(
+        &self,
+        request: RequestBuilder,
+    ) -> crate::error::Result<Vec<u32>> {
+        let (messages, tools, enable_thinking) = request.into_tokenization_parts();
+        let (tx, mut rx) = channel(1);
+        let request = Request::Tokenize(TokenizationRequest {
+            text: Either::Left(messages),
+            tools: Some(tools),
+            add_special_tokens: false,
+            add_generation_prompt: true,
+            response: tx,
+            enable_thinking,
+            reasoning_effort: None,
+        });
+        self.runner.get_sender(None)?.send(request).await?;
+
+        rx.recv()
+            .await
+            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
+            .map_err(|e| SdkError::Inference(e.into()))
     }
 
     /// Tokenize some text or messages using a specific model.

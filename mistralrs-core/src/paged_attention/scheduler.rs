@@ -1090,7 +1090,14 @@ impl PagedAttentionScheduler {
             }
 
             if let Some(reason) = ignore_reason {
-                self.fail_front_of_waiting(reason, "cache_exhausted", &mut prefix_validator);
+                warn!("{reason}");
+                self.finish_front_of_waiting(
+                    Response::ContextLengthExceeded {
+                        requested_tokens: num_tokens,
+                    },
+                    "cache_exhausted",
+                    &mut prefix_validator,
+                );
                 continue;
             }
 

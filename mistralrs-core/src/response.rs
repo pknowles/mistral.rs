@@ -359,6 +359,12 @@ pub struct ServiceUnavailableError(pub String);
 pub enum Response {
     InternalError(Box<dyn Error + Send + Sync>),
     ValidationError(Box<dyn Error + Send + Sync>),
+    /// The fixed paged KV cache cannot admit this request. Returning a
+    /// structured terminal response lets callers distinguish capacity from a
+    /// disconnected or malformed inference stream.
+    ContextLengthExceeded {
+        requested_tokens: usize,
+    },
     // Chat
     ModelError(String, ChatCompletionResponse),
     Done(ChatCompletionResponse),
@@ -450,6 +456,7 @@ pub enum ResponseOk {
 pub enum ResponseErr {
     InternalError(Box<dyn Error + Send + Sync>),
     ValidationError(Box<dyn Error + Send + Sync>),
+    ContextLengthExceeded { requested_tokens: usize },
     ModelError(String, ChatCompletionResponse),
     CompletionModelError(String, CompletionResponse),
 }
@@ -458,6 +465,10 @@ impl Display for ResponseErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InternalError(e) | Self::ValidationError(e) => Display::fmt(e, f),
+            Self::ContextLengthExceeded { requested_tokens } => write!(
+                f,
+                "fixed KV cache cannot admit a sequence of {requested_tokens} tokens"
+            ),
             Self::ModelError(e, x) => f
                 .debug_struct("ChatModelError")
                 .field("msg", e)
@@ -476,6 +487,10 @@ impl Debug for ResponseErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InternalError(e) | Self::ValidationError(e) => Debug::fmt(e, f),
+            Self::ContextLengthExceeded { requested_tokens } => f
+                .debug_struct("ContextLengthExceeded")
+                .field("requested_tokens", requested_tokens)
+                .finish(),
             Self::ModelError(e, x) => f
                 .debug_struct("ChatModelError")
                 .field("msg", e)
@@ -502,6 +517,11 @@ impl Response {
             Self::CompletionChunk(x) => Ok(ResponseOk::CompletionChunk(x)),
             Self::InternalError(e) => Err(Box::new(ResponseErr::InternalError(e))),
             Self::ValidationError(e) => Err(Box::new(ResponseErr::ValidationError(e))),
+            Self::ContextLengthExceeded { requested_tokens } => {
+                Err(Box::new(ResponseErr::ContextLengthExceeded {
+                    requested_tokens,
+                }))
+            }
             Self::ModelError(e, x) => Err(Box::new(ResponseErr::ModelError(e, x))),
             Self::CompletionModelError(e, x) => {
                 Err(Box::new(ResponseErr::CompletionModelError(e, x)))

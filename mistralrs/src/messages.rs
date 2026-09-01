@@ -853,6 +853,20 @@ impl RequestBuilder {
         self
     }
 
+    /// Consume this request into the chat-template inputs used for token
+    /// counting. This intentionally retains tool-call and tool-result message
+    /// structure, unlike [`TextMessages`], so a caller can count precisely the
+    /// request it will send to a model.
+    pub(crate) fn into_tokenization_parts(
+        self,
+    ) -> (
+        Vec<IndexMap<String, MessageContent>>,
+        Vec<Tool>,
+        Option<bool>,
+    ) {
+        (self.messages, self.tools, self.enable_thinking)
+    }
+
     /// Append a message containing images.
     ///
     /// Model-specific prefix tokens are applied automatically when the

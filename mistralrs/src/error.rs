@@ -18,6 +18,13 @@ pub enum Error {
     #[error("inference error: {0}")]
     Inference(Box<dyn std::error::Error + Send + Sync>),
 
+    /// The fixed paged KV cache cannot admit this request.
+    #[error("fixed KV cache cannot admit a sequence of {requested_tokens} tokens")]
+    ContextLengthExceeded {
+        /// Exact template-expanded request length that could not be admitted.
+        requested_tokens: usize,
+    },
+
     /// A validation error on the request (e.g., empty messages, bad constraint).
     #[error("request validation error: {0}")]
     RequestValidation(String),
@@ -113,6 +120,9 @@ impl From<Box<mistralrs_core::ResponseErr>> for Error {
             mistralrs_core::ResponseErr::InternalError(inner) => Error::Inference(inner),
             mistralrs_core::ResponseErr::ValidationError(inner) => {
                 Error::RequestValidation(inner.to_string())
+            }
+            mistralrs_core::ResponseErr::ContextLengthExceeded { requested_tokens } => {
+                Error::ContextLengthExceeded { requested_tokens }
             }
             mistralrs_core::ResponseErr::ModelError(message, response) => Error::ModelError {
                 message,
