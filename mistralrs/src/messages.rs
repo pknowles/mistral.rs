@@ -839,7 +839,8 @@ impl RequestBuilder {
                         "function".to_string(),
                         json!({
                             "name": t.function.name,
-                            "arguments": t.function.arguments,
+                            "arguments": serde_json::from_str::<Value>(&t.function.arguments)
+                                .unwrap_or_else(|_| Value::String(t.function.arguments.clone())),
                         }),
                     ),
                 ])
