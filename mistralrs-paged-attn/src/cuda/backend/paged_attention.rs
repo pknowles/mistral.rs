@@ -663,7 +663,7 @@ fn update_cache<
             v_ptr as *const core::ffi::c_void,
             kc_ptr as *const core::ffi::c_void,
             vc_ptr as *const core::ffi::c_void,
-            s_ptr as *const core::ffi::c_long,
+            s_ptr as *const i64,
             num_tokens as c_int,
             num_heads as c_int,
             head_size as c_int,

@@ -29,6 +29,21 @@ async fn send_raw_chat_request<R: RequestLike>(&self, request: R) -> Result<(Vec
 ```
 Returns raw logits of the first generated token plus the prompt tokens. Example: [perplexity](/examples/rust/advanced/perplexity/).
 
+## Prompt observation
+
+`RequestBuilder::with_prompt_observer(PromptObserver)` opts one request into
+observing its rendered prompt, token IDs, and optional `ChatTemplateFormat`.
+The engine awaits the observer after normal tokenization and before admitting
+generation; an observer error terminates the request with its error context.
+Observation does not perform another render or tokenization pass.
+
+`ChatTemplateFormat` is serializable and retains the selected template, special
+tokens, reasoning controls, content conversion, and original clock.
+`format.render(messages, tools)` uses the normal renderer with that retained
+clock, including `strftime_now` and `date_string`. Custom processors that do
+additional prompt transformations may supply no reproducible format. The
+observer owns any storage or verification policy; the runtime adds neither.
+
 ## Reasoning
 
 `ReasoningEffort::{Off, Low, Medium, High, XHigh}` is accepted by `TextMessages::with_reasoning_effort`, `MultimodalMessages::with_reasoning_effort`, `RequestBuilder::with_reasoning_effort`, and `AgentBuilder::with_reasoning_effort`. The existing `enable_thinking(bool)` or `with_enable_thinking(bool)` methods remain available. Omission leaves effort unspecified with thinking enabled; contradictory explicit controls return a request-validation error.

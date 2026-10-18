@@ -45,7 +45,7 @@ __device__ __forceinline__ float atomicMaxFloat(float *address, float val) {
 // https://github.com/guoqingbao/attention.rs/tree/main/src/kernels/src/update_kvscales.cu
 template <typename T>
 __global__ void compute_and_update_scales_kernel(
-    const T *__restrict__ k, const T *__restrict__ v, long num_elements,
+    const T *__restrict__ k, const T *__restrict__ v, int64_t num_elements,
     float *__restrict__ k_scales, // single-float pointer in device memory
     float *__restrict__ v_scales  // single-float pointer in device memory
 ) {
@@ -56,15 +56,15 @@ __global__ void compute_and_update_scales_kernel(
   const int tid = threadIdx.x;
   const int bdim = blockDim.x;
   const int gdim = gridDim.x;
-  long global_thread_index = (long)blockIdx.x * bdim + tid;
+  int64_t global_thread_index = (int64_t)blockIdx.x * bdim + tid;
 
   // per-thread local maxima
   float local_max_k = 0.0f;
   float local_max_v = 0.0f;
 
   // strided loop covering entire array
-  long idx = global_thread_index;
-  long stride = (long)bdim * (long)gdim;
+  int64_t idx = global_thread_index;
+  int64_t stride = (int64_t)bdim * (int64_t)gdim;
   while (idx < num_elements) {
     float avk = to_float_abs<T>(k[idx]);
     float avv = to_float_abs<T>(v[idx]);
@@ -106,12 +106,12 @@ __global__ void compute_and_update_scales_kernel(
 }
 
 template <typename T>
-void update_scales_typed(T *k, T *v, long num_elements,
+void update_scales_typed(T *k, T *v, int64_t num_elements,
                          float *k_scales, // device single float pointer
                          float *v_scales, // device single float pointer
                          int64_t stream_) {
   const int threads = 512;
-  long blocks = (num_elements + threads - 1) / threads;
+  int64_t blocks = (num_elements + threads - 1) / threads;
   if (blocks == 0)
     blocks = 1;
   if (blocks > 65535)
@@ -123,7 +123,7 @@ void update_scales_typed(T *k, T *v, long num_elements,
                                                        k_scales, v_scales);
 }
 
-extern "C" void update_kv_scales_f32(void *k, void *v, const long num_elements,
+extern "C" void update_kv_scales_f32(void *k, void *v, const int64_t num_elements,
                                      float *k_scales, float *v_scales,
                                      int64_t stream_) {
   update_scales_typed<float>(reinterpret_cast<float *>(k),
@@ -131,7 +131,7 @@ extern "C" void update_kv_scales_f32(void *k, void *v, const long num_elements,
                              k_scales, v_scales, stream_);
 }
 
-extern "C" void update_kv_scales_f16(void *k, void *v, const long num_elements,
+extern "C" void update_kv_scales_f16(void *k, void *v, const int64_t num_elements,
                                      float *k_scales, float *v_scales,
                                      int64_t stream_) {
   update_scales_typed<__half>(reinterpret_cast<__half *>(k),
@@ -139,7 +139,7 @@ extern "C" void update_kv_scales_f16(void *k, void *v, const long num_elements,
                               k_scales, v_scales, stream_);
 }
 
-extern "C" void update_kv_scales_bf16(void *k, void *v, const long num_elements,
+extern "C" void update_kv_scales_bf16(void *k, void *v, const int64_t num_elements,
                                       float *k_scales, float *v_scales,
                                       int64_t stream_) {
   update_scales_typed<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16 *>(k),

@@ -84,7 +84,7 @@ impl Processor for SpeechProcessor {
         _enable_thinking: Option<bool>,
         _reasoning_effort: Option<crate::request::ReasoningEffort>,
         _tools: Vec<crate::Tool>,
-    ) -> Result<(Vec<u32>, String)> {
+    ) -> Result<(Vec<u32>, String, Option<crate::ChatTemplateFormat>)> {
         anyhow::bail!(
             "SpeechProcessor::process should not be used. It does not expect chat messages."
         )

@@ -259,7 +259,9 @@ pub use mistralrs_core::{
     AgenticToolCallRecord, File, FileContent, FileSource, RequestedFile, MODEL_INLINE_BYTES,
     WIRE_EMBED_LIMIT_BYTES,
 };
-pub use mistralrs_core::{CalibrationAction, CalibrationStatus};
+pub use mistralrs_core::{
+    CalibrationAction, CalibrationStatus, ChatTemplateFormat, PromptObserver,
+};
 pub use mistralrs_core::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };

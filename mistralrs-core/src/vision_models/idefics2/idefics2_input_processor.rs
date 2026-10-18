@@ -77,7 +77,7 @@ impl Processor for Idefics2Processor {
         enable_thinking: Option<bool>,
         reasoning_effort: Option<ReasoningEffort>,
         tools: Vec<Tool>,
-    ) -> anyhow::Result<(Vec<u32>, String)> {
+    ) -> anyhow::Result<(Vec<u32>, String, Option<crate::ChatTemplateFormat>)> {
         let mut prompt = apply_chat_template(
             pipeline,
             messages,
@@ -120,7 +120,7 @@ impl Processor for Idefics2Processor {
         let encoding = tokenizer
             .encode_fast(prompt.clone(), add_special_tokens)
             .map_err(anyhow::Error::msg)?;
-        Ok((encoding.get_ids().to_vec(), prompt))
+        Ok((encoding.get_ids().to_vec(), prompt, None))
     }
 
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {

@@ -89,7 +89,7 @@ impl MemoryUsage {
             }
             #[cfg(feature = "cuda")]
             Device::Cuda(dev) => {
-                if super::normal::is_integrated_gpu(device) {
+                if super::normal::is_integrated_gpu(device) && !cfg!(windows) {
                     let mut sys = System::new();
                     sys.refresh_memory();
                     let total_bytes = usize::try_from(sys.total_memory())?;
@@ -107,7 +107,16 @@ impl MemoryUsage {
 
                     dev.cuda_stream().context().bind_to_thread().w()?;
                     let (free, total) = result::mem_get_info().w()?;
-                    Ok(DeviceMemory::Discrete { total, free })
+                    // On Windows UMA the driver reports the combined dedicated/shared
+                    // CUDA budget; free CPU RAM does not describe CUDA availability.
+                    if super::normal::is_integrated_gpu(device) {
+                        Ok(DeviceMemory::Unified {
+                            budget: total,
+                            allocated: total.saturating_sub(free),
+                        })
+                    } else {
+                        Ok(DeviceMemory::Discrete { total, free })
+                    }
                 }
             }
             #[cfg(not(feature = "cuda"))]

@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc::{channel, Receiver};
 
 use crate::error::Error as SdkError;
-use crate::{EmbeddingRequest, EmbeddingRequestBuilder, RequestLike, TextMessages, RequestBuilder};
+use crate::{EmbeddingRequest, EmbeddingRequestBuilder, RequestBuilder, RequestLike, TextMessages};
 
 // Re-export for convenience
 pub use mistralrs_core::{AddModelConfig, ModelStatus, Pipeline, SchedulerConfig};
@@ -298,6 +298,7 @@ impl Model {
             is_streaming: true,
             id: 0,
             queued_at: None,
+            prompt_observer: request.take_prompt_observer(),
             constraint: request.take_constraint(),
             suffix: None,
             tools,
@@ -367,6 +368,7 @@ impl Model {
             is_streaming: false,
             id: 0,
             queued_at: None,
+            prompt_observer: request.take_prompt_observer(),
             constraint: request.take_constraint(),
             suffix: None,
             tools,
@@ -454,6 +456,7 @@ impl Model {
             is_streaming: false,
             id: 0,
             queued_at: None,
+            prompt_observer: request.take_prompt_observer(),
             constraint: request.take_constraint(),
             suffix: None,
             tools,
@@ -620,6 +623,7 @@ impl Model {
         let request = Request::Normal(Box::new(NormalRequest {
             id: 0,
             queued_at: None,
+            prompt_observer: None,
             messages: RequestMessage::ImageGeneration {
                 prompt: prompt.to_string(),
                 format: response_format,
@@ -700,6 +704,7 @@ impl Model {
         let request = Request::Normal(Box::new(NormalRequest {
             id: 0,
             queued_at: None,
+            prompt_observer: None,
             messages: RequestMessage::SpeechGeneration {
                 prompt: prompt.to_string(),
             },
@@ -792,6 +797,7 @@ impl Model {
                 let request = Request::Normal(Box::new(NormalRequest {
                     id: 0,
                     queued_at: None,
+                    prompt_observer: None,
                     messages: message,
                     sampling_params: SamplingParams::deterministic(),
                     seed: None,

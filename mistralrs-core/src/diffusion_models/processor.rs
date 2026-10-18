@@ -29,7 +29,7 @@ impl Processor for DiffusionProcessor {
         _enable_thinking: Option<bool>,
         _reasoning_effort: Option<crate::request::ReasoningEffort>,
         _tools: Vec<crate::Tool>,
-    ) -> Result<(Vec<u32>, String)> {
+    ) -> Result<(Vec<u32>, String, Option<crate::ChatTemplateFormat>)> {
         anyhow::bail!(
             "DiffusionProcessor::process should not be used. It does not expect chat messages."
         )

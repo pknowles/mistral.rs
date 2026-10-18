@@ -208,7 +208,7 @@ pub fn concat_and_cache_mla(
             kpe_ptr as *const core::ffi::c_void,
             ckv_cache_ptr as *const core::ffi::c_void,
             kpe_cache_ptr as *const core::ffi::c_void,
-            slot_ptr as *const core::ffi::c_long,
+            slot_ptr as *const i64,
             num_tokens as i32,
             kv_lora_rank as i32,
             kpe_head_dim as i32,

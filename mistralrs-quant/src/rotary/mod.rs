@@ -282,8 +282,8 @@ fn typed_slice<'a, T>(xs: &'a [T], layout: &Layout, name: &'static str) -> Resul
     }
 }
 
-fn cpu_positions<'a>(
-    storage_and_layout: &'a Option<(std::sync::RwLockReadGuard<'a, Storage>, &'a Layout)>,
+fn cpu_positions<'a, G: std::ops::Deref<Target = Storage>>(
+    storage_and_layout: &'a Option<(G, &'a Layout)>,
 ) -> Result<Option<&'a [u32]>> {
     let Some((storage, layout)) = storage_and_layout else {
         return Ok(None);
@@ -889,7 +889,7 @@ mod cuda {
         CpuStorage, DType, InplaceOp3, Layout, MetalStorage, Result, Storage, Tensor,
     };
     use half::{bf16, f16};
-    use std::ffi::{c_int, c_long};
+    use std::ffi::c_int;
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -1003,7 +1003,7 @@ mod cuda {
         };
 
         let neox = if is_neox { 1 } else { 0 };
-        let stream = stream.cu_stream() as c_long;
+        let stream = stream.cu_stream() as i64;
         let internal_type = rotary_dtype(query_dtype)?;
         match positions {
             None => unsafe {
@@ -1014,11 +1014,11 @@ mod cuda {
                     sin_cache as *const core::ffi::c_void,
                     neox,
                     head_size as c_int,
-                    num_tokens as c_long,
+                    num_tokens as i64,
                     rot_dim as c_int,
                     num_heads as c_int,
                     0,
-                    query_l.stride()[0] as c_long,
+                    query_l.stride()[0] as i64,
                     0,
                     internal_type,
                     stream,
@@ -1033,12 +1033,12 @@ mod cuda {
                     positions as *const core::ffi::c_void,
                     neox,
                     head_size as c_int,
-                    num_tokens as c_long,
+                    num_tokens as i64,
                     rot_dim as c_int,
                     seq_len as c_int,
                     num_heads as c_int,
                     0,
-                    query_l.stride()[0] as c_long,
+                    query_l.stride()[0] as i64,
                     0,
                     internal_type,
                     stream,
@@ -1405,4 +1405,48 @@ pub fn apply_rotary_inplace_q_positions(
     _is_neox: bool,
 ) -> candle_core::Result<()> {
     candle_core::bail!("apply_rotary is only supported for cuda");
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_tests {
+    use super::{apply_rotary_inplace_q, apply_rotary_inplace_q_positions};
+    use candle_core::{DType, Device, Result, Tensor};
+
+    const QUERY_SHAPE: (usize, usize, usize) = (2, 1, 4);
+    const CACHE_SHAPE: (usize, usize) = (2, 2);
+
+    #[test]
+    fn rotary_preserves_stream_handles_for_both_position_paths() -> Result<()> {
+        let device = Device::new_cuda_with_stream(0)?;
+        for dtype in [DType::F16, DType::BF16, DType::F32] {
+            for explicit_positions in [false, true] {
+                let query = Tensor::from_vec(
+                    vec![0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+                    QUERY_SHAPE,
+                    &device,
+                )?
+                .to_dtype(dtype)?;
+                let cos = Tensor::from_vec(vec![0.0f32, 0.0, 1.0, 1.0], CACHE_SHAPE, &device)?
+                    .to_dtype(dtype)?;
+                let sin = Tensor::from_vec(vec![1.0f32, 1.0, 0.0, 0.0], CACHE_SHAPE, &device)?
+                    .to_dtype(dtype)?;
+                let expected = if explicit_positions {
+                    let positions = Tensor::new(&[1u32, 0], &device)?;
+                    apply_rotary_inplace_q_positions(&query, &cos, &sin, &positions, true)?;
+                    vec![0.0, 1.0, 2.0, 3.0, -6.0, -7.0, 4.0, 5.0]
+                } else {
+                    apply_rotary_inplace_q(&query, &cos, &sin, true)?;
+                    vec![-2.0, -3.0, 0.0, 1.0, 4.0, 5.0, 6.0, 7.0]
+                };
+                assert_eq!(
+                    query
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?,
+                    expected
+                );
+            }
+        }
+        Ok(())
+    }
 }

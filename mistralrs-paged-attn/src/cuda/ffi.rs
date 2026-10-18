@@ -1,4 +1,4 @@
-use core::ffi::{c_int, c_long, c_uint, c_void};
+use core::ffi::{c_int, c_uint, c_void};
 
 use candle_core::cuda::cudarc::driver::sys::CUstream;
 
@@ -104,7 +104,7 @@ extern "C" {
         value: *const c_void,
         key_cache: *const c_void,
         value_cache: *const c_void,
-        slot_mapping: *const c_long,
+        slot_mapping: *const i64,
 
         num_tokens: c_int,
         num_heads: c_int,
@@ -126,7 +126,7 @@ extern "C" {
         k_pe: *const c_void,
         ckv_cache: *const c_void,
         kpe_cache: *const c_void,
-        slot_mapping: *const c_long,
+        slot_mapping: *const i64,
         num_tokens: c_int,
         kv_lora_rank: c_int,
         kpe_head_dim: c_int,
@@ -167,7 +167,7 @@ extern "C" {
         value: *const c_void,
         key_cache: *const c_void,
         value_cache: *const c_void,
-        slot_mapping: *const c_long,
+        slot_mapping: *const i64,
         num_tokens: c_int,
         num_heads: c_int,
         head_size: c_int,
@@ -490,7 +490,7 @@ extern "C" {
     pub fn update_kv_scales_f32(
         k: *const c_void,
         v: *const c_void,
-        elements: c_long,
+        elements: i64,
         k_scales: *const f32,
         v_scales: *const f32,
         stream: i64,
@@ -499,7 +499,7 @@ extern "C" {
     pub fn update_kv_scales_f16(
         k: *const c_void,
         v: *const c_void,
-        elements: c_long,
+        elements: i64,
         k_scales: *const f32,
         v_scales: *const f32,
         stream: i64,
@@ -508,7 +508,7 @@ extern "C" {
     pub fn update_kv_scales_bf16(
         k: *const c_void,
         v: *const c_void,
-        elements: c_long,
+        elements: i64,
         k_scales: *const f32,
         v_scales: *const f32,
         stream: i64,

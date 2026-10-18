@@ -9,6 +9,7 @@ pub use engine::{
 };
 use hf_hub::Cache;
 pub use lora::Ordering;
+pub use pipeline::chat_template::ChatTemplateFormat;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
 pub use pipeline::Pipeline;
@@ -95,12 +96,14 @@ mod perf_flags;
 mod pipeline;
 mod prefix_cacher;
 pub mod reasoning_parsers;
+pub mod remote_fetch;
 mod request;
 pub mod resource_plan;
 mod response;
 mod sampler;
 mod scheduler;
 mod sequence;
+mod special_text;
 pub mod speculative;
 mod speech_models;
 mod toml_selector;
@@ -184,7 +187,7 @@ pub use pipeline::{
 pub use request::{
     resolve_reasoning_controls, ApproximateUserLocation, CalibrationAction, CalibrationRequest,
     Constraint, DetokenizationRequest, ImageGenerationResponseFormat, LlguidanceGrammar,
-    MessageContent, NormalRequest, ReasoningControlError, ReasoningEffort,
+    MessageContent, NormalRequest, PromptObserver, ReasoningControlError, ReasoningEffort,
     ReasoningEffortParseError, Request, RequestMessage, ResolvedReasoningControls,
     SearchContextSize, TokenizationRequest, WebSearchContentType, WebSearchFilters,
     WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
@@ -1637,6 +1640,7 @@ impl MistralRs {
                 let req = Request::Normal(Box::new(NormalRequest {
                     id: 0,
                     queued_at: None,
+                    prompt_observer: None,
                     messages: RequestMessage::Completion {
                         text: "hello".to_string(),
                         echo_prompt: false,

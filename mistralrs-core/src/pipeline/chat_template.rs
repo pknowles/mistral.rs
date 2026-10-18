@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use either::Either;
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -441,12 +441,6 @@ impl serde_json::ser::Formatter for PythonCompactFormatter {
     }
 }
 
-fn strftime_now(fmt: String) -> Result<String, minijinja::Error> {
-    let date = chrono::Local::now();
-    let date_string = date.format(&fmt).to_string();
-    Ok(date_string)
-}
-
 use crate::request::{resolve_reasoning_controls, ReasoningEffort};
 
 /// Check if a chat template uses Gemma 4 tool call tokens.
@@ -460,18 +454,6 @@ fn is_liquid_tool_template(template: &str) -> bool {
 
 fn is_atem_tool_template(template: &str) -> bool {
     template.contains("<atem:function_calls>") && template.contains("<atem:invoke")
-}
-
-/// Whether the template walks tool call arguments as key/value pairs.
-///
-/// OpenAI sends `arguments` as a JSON string while templates are authored against the map that
-/// transformers passes, so those templates fail on the string unless it is parsed first.
-fn iterates_tool_call_arguments(template: &str) -> bool {
-    let compact = template
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>();
-    compact.contains("arguments|items") || compact.contains("arguments.items()")
 }
 
 fn normalize_minijinja_compatibility(template: &str) -> String {
@@ -708,33 +690,12 @@ fn preprocess_gemma4_tool_messages(messages: &mut Vec<IndexMap<String, MessageCo
     *messages = result;
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn apply_chat_template_to(
-    mut messages: Vec<IndexMap<String, MessageContent>>,
-    add_generation_prompt: bool,
-    enable_thinking: Option<bool>,
-    reasoning_effort: Option<ReasoningEffort>,
+pub(crate) fn resolve_chat_template(
     template: &ChatTemplateValue,
-    bos_tok: Option<String>,
-    eos_tok: Option<String>,
-    unk_tok: Option<String>,
-    tools: Vec<Tool>,
+    tools: &[Tool],
 ) -> Result<String> {
-    let mut env = Environment::new();
-
-    // enable python methods such as .strip()
-    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-
-    // https://github.com/huggingface/transformers/blob/76a33a10923ccc1074917f6b6a1e719e626b7dc9/src/transformers/tokenization_utils_base.py#L1842
-    env.set_lstrip_blocks(true);
-    env.set_trim_blocks(true);
-
-    #[derive(Serialize, Deserialize)]
-    struct UntaggedContent(#[serde(with = "either::serde_untagged")] MessageContent);
-
-    // Resolve template string early so we can check for Gemma 4 format
-    let resolved_template = match &template.0 {
-        Either::Left(x) => x.clone(),
+    match &template.0 {
+        Either::Left(x) => Ok(x.clone()),
         Either::Right(map) => {
             let has_tool_use = map.iter().any(|t| {
                 t.get("name").is_some_and(|name| name == "tool_use") || t.contains_key("tool_use")
@@ -769,133 +730,211 @@ pub fn apply_chat_template_to(
                 }
             }
 
-            found_template.ok_or_else(|| anyhow::anyhow!("Chat template does not contain a `tool_use` or `default` key. Please ensure it contains at least a `default` key, although `tool_use` should be specified for using tools."))?
+            found_template.ok_or_else(|| anyhow::anyhow!("Chat template does not contain a `tool_use` or `default` key. Please ensure it contains at least a `default` key, although `tool_use` should be specified for using tools."))
         }
-    };
+    }
+}
 
-    let is_gemma4_template = is_gemma4_tool_template(&resolved_template);
-    let is_liquid_template = is_liquid_tool_template(&resolved_template);
+/// The template inputs needed to reproduce a render, including its original clock.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatTemplateFormat {
+    pub template: String,
+    pub bos_tok: Option<String>,
+    pub eos_tok: Option<String>,
+    pub unk_tok: Option<String>,
+    pub add_generation_prompt: bool,
+    pub enable_thinking: Option<bool>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub rendered_at: String,
+    #[serde(default)]
+    pub(crate) messages_action: super::processing::MessagesAction,
+    #[serde(default)]
+    pub(crate) tool_output_special_tokens: std::collections::BTreeSet<Vec<u8>>,
+}
 
-    // HF templates expect tool_calls[].function.arguments as a mapping, not the OpenAI wire string
-    parse_tool_call_arguments(&mut messages);
-    if is_gemma4_template {
-        preprocess_gemma4_tool_messages(&mut messages);
-    } else if is_liquid_template {
-        clear_assistant_tool_call_content(&mut messages);
-    } else if iterates_tool_call_arguments(&resolved_template) {
+impl ChatTemplateFormat {
+    pub fn render(
+        &self,
+        messages: Vec<IndexMap<String, MessageContent>>,
+        tools: Vec<Tool>,
+    ) -> Result<String> {
+        let mut messages = super::processing::prepare_messages(messages, self.messages_action);
+        crate::special_text::defuse_tool_output(
+            &mut messages,
+            &crate::special_text::SpecialStrings::from_strings(
+                self.tool_output_special_tokens.iter().cloned().collect(),
+            ),
+        );
+        let date = chrono::DateTime::parse_from_rfc3339(&self.rendered_at)
+            .context("invalid chat-template render time")?;
+        let mut env = Environment::new();
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        env.set_lstrip_blocks(true);
+        env.set_trim_blocks(true);
+        #[derive(Serialize, Deserialize)]
+        struct UntaggedContent(#[serde(with = "either::serde_untagged")] MessageContent);
+        let resolved_template = self.template.as_str();
+        let add_generation_prompt = self.add_generation_prompt;
+        let enable_thinking = self.enable_thinking;
+        let reasoning_effort = self.reasoning_effort;
+        let bos_tok = &self.bos_tok;
+        let eos_tok = &self.eos_tok;
+        let unk_tok = &self.unk_tok;
+
+        let is_gemma4_template = is_gemma4_tool_template(resolved_template);
+        let is_liquid_template = is_liquid_tool_template(resolved_template);
+
+        // Templates consume structured arguments rather than the OpenAI wire string.
         parse_tool_call_arguments(&mut messages);
-    }
-
-    let mut new_messages = Vec::new();
-    for message in messages {
-        let mut new_message = IndexMap::new();
-        for (k, v) in message {
-            new_message.insert(k, UntaggedContent(v));
+        if is_gemma4_template {
+            preprocess_gemma4_tool_messages(&mut messages);
+        } else if is_liquid_template {
+            clear_assistant_tool_call_content(&mut messages);
         }
-        new_messages.push(new_message);
-    }
 
-    // Use the already-resolved template string
-    let mut template = normalize_minijinja_compatibility(&resolved_template);
-    template = template.replace("[::-1]", "|reverse");
-    // Convert Python‑style descending ranges `range(..., -1, -1)` to a forward
-    // range followed by Jinja’s `|reverse` filter so it works even when
-    // negative‑step ranges aren’t supported.
-    let re = Regex::new(r"range\((?P<expr>[^,]+),\s*-1,\s*-1\)").unwrap();
-    template = re
-        .replace_all(&template, |caps: &regex::Captures| {
-            format!("range({})|reverse", &caps["expr"])
-        })
-        .into_owned();
-
-    if template.contains("{{ meta }}") {
-        // Fix for GLM4 models
-        template = template.replace("{%- set meta = message.get(\"metadata\", \"\") %}", "");
-        template = template.replace("{{ meta }}", "");
-    }
-    let generation_re = Regex::new(r"\{%-?\s*(?:end)?generation\s*-?%\}").unwrap();
-    template = generation_re.replace_all(&template, "").into_owned();
-
-    env.add_template("chat_template", &template)?;
-    env.add_function("raise_exception", raise_exception);
-    env.add_filter("tojson", tojson);
-    env.add_function("strftime_now", strftime_now);
-    let tmpl = env.get_template("chat_template")?;
-
-    let date = chrono::Local::now();
-    let date_string = date.format("%d, %B, %Y").to_string();
-
-    let reasoning_controls = resolve_reasoning_controls(enable_thinking, reasoning_effort)?;
-    let reasoning_effort_value = reasoning_controls
-        .reasoning_effort
-        .map(|effort| Value::from(effort.as_str()))
-        .unwrap_or(Value::UNDEFINED);
-
-    // Detect builtin tools from the tools list
-    // Known builtin tools for GPT-OSS/Harmony format: "browser", "python"
-    // Known builtin tools for Llama 3.x: "wolfram_alpha", "web_search", "brave_search", "python", "code_interpreter"
-    let builtin_tool_names = [
-        "browser",
-        "python",
-        "code_interpreter",
-        "web_search",
-        "brave_search",
-        "wolfram_alpha",
-    ];
-    let builtin_tools: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| {
-            let name = t.function.name.as_str();
-            if builtin_tool_names.contains(&name) {
-                Some(name)
-            } else {
-                None
+        let mut new_messages = Vec::new();
+        for message in messages {
+            let mut new_message = IndexMap::new();
+            for (k, v) in message {
+                new_message.insert(k, UntaggedContent(v));
             }
-        })
-        .collect();
+            new_messages.push(new_message);
+        }
 
-    let is_gemma4 = is_gemma4_tool_template(&resolved_template);
+        // Use the already-resolved template string
+        let mut template = normalize_minijinja_compatibility(resolved_template);
+        template = template.replace("[::-1]", "|reverse");
+        // Convert Python‑style descending ranges `range(..., -1, -1)` to a forward
+        // range followed by Jinja’s `|reverse` filter so it works even when
+        // negative‑step ranges aren’t supported.
+        let re = Regex::new(r"range\((?P<expr>[^,]+),\s*-1,\s*-1\)").unwrap();
+        template = re
+            .replace_all(&template, |caps: &regex::Captures| {
+                format!("range({})|reverse", &caps["expr"])
+            })
+            .into_owned();
 
-    let tools = tools.iter().map(tool_template_value).collect::<Vec<_>>();
-    let mut rendered = if tools.is_empty() {
-        tmpl.render(context! {
-            messages => new_messages,
-            add_generation_prompt => add_generation_prompt,
-            bos_token => bos_tok,
-            eos_token => eos_tok,
-            unk_token => unk_tok,
-            date_string => date_string,
-            enable_thinking => reasoning_controls.enable_thinking,
-            reasoning_effort => &reasoning_effort_value,
-            reasoning_strength => &reasoning_effort_value,
-        })?
-    } else {
-        tmpl.render(context! {
-            messages => new_messages,
-            add_generation_prompt => add_generation_prompt,
-            bos_token => bos_tok,
-            eos_token => eos_tok,
-            unk_token => unk_tok,
-            xml_tools => tools.clone(), // SmolLM3
-            tools => tools,
-            builtin_tools => builtin_tools,
-            date_string => date_string,
-            enable_thinking => reasoning_controls.enable_thinking,
-            reasoning_effort => &reasoning_effort_value,
-            reasoning_strength => &reasoning_effort_value,
-        })?
-    };
+        if template.contains("{{ meta }}") {
+            // Fix for GLM4 models
+            template = template.replace("{%- set meta = message.get(\"metadata\", \"\") %}", "");
+            template = template.replace("{{ meta }}", "");
+        }
+        let generation_re = Regex::new(r"\{%-?\s*(?:end)?generation\s*-?%\}").unwrap();
+        template = generation_re.replace_all(&template, "").into_owned();
 
-    // Gemma 4 fix: when tool_responses are in a user turn (the correct
-    // format), the template's generation-prompt logic skips `<|turn>model\n`
-    // because it checks `prev_message_type != 'tool_response'`.  But the
-    // training data ALWAYS has `<|turn>model\n` before the model generates.
-    // Append it when the template left it out.
-    if is_gemma4 && add_generation_prompt && rendered.ends_with("<tool_response|>") {
-        rendered.push_str("<|turn>model\n");
+        env.add_template("chat_template", &template)?;
+        env.add_function("raise_exception", raise_exception);
+        env.add_filter("tojson", tojson);
+        env.add_function(
+            "strftime_now",
+            move |fmt: String| -> Result<String, minijinja::Error> {
+                Ok(date.format(&fmt).to_string())
+            },
+        );
+        let tmpl = env.get_template("chat_template")?;
+
+        let date_string = date.format("%d, %B, %Y").to_string();
+
+        let reasoning_controls = resolve_reasoning_controls(enable_thinking, reasoning_effort)?;
+        let reasoning_effort_value = reasoning_controls
+            .reasoning_effort
+            .map(|effort| Value::from(effort.as_str()))
+            .unwrap_or(Value::UNDEFINED);
+
+        // Detect builtin tools from the tools list
+        // Known builtin tools for GPT-OSS/Harmony format: "browser", "python"
+        // Known builtin tools for Llama 3.x: "wolfram_alpha", "web_search", "brave_search", "python", "code_interpreter"
+        let builtin_tool_names = [
+            "browser",
+            "python",
+            "code_interpreter",
+            "web_search",
+            "brave_search",
+            "wolfram_alpha",
+        ];
+        let builtin_tools: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| {
+                let name = t.function.name.as_str();
+                if builtin_tool_names.contains(&name) {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let is_gemma4 = is_gemma4_tool_template(resolved_template);
+
+        let tools = tools.iter().map(tool_template_value).collect::<Vec<_>>();
+        let mut rendered = if tools.is_empty() {
+            tmpl.render(context! {
+                messages => new_messages,
+                add_generation_prompt => add_generation_prompt,
+                bos_token => bos_tok,
+                eos_token => eos_tok,
+                unk_token => unk_tok,
+                date_string => date_string,
+                enable_thinking => reasoning_controls.enable_thinking,
+                reasoning_effort => &reasoning_effort_value,
+                reasoning_strength => &reasoning_effort_value,
+            })?
+        } else {
+            tmpl.render(context! {
+                messages => new_messages,
+                add_generation_prompt => add_generation_prompt,
+                bos_token => bos_tok,
+                eos_token => eos_tok,
+                unk_token => unk_tok,
+                xml_tools => tools.clone(), // SmolLM3
+                tools => tools,
+                builtin_tools => builtin_tools,
+                date_string => date_string,
+                enable_thinking => reasoning_controls.enable_thinking,
+                reasoning_effort => &reasoning_effort_value,
+                reasoning_strength => &reasoning_effort_value,
+            })?
+        };
+
+        // Gemma 4 fix: when tool_responses are in a user turn (the correct
+        // format), the template's generation-prompt logic skips `<|turn>model\n`
+        // because it checks `prev_message_type != 'tool_response'`.  But the
+        // training data ALWAYS has `<|turn>model\n` before the model generates.
+        // Append it when the template left it out.
+        if is_gemma4 && add_generation_prompt && rendered.ends_with("<tool_response|>") {
+            rendered.push_str("<|turn>model\n");
+        }
+
+        Ok(rendered)
     }
+}
 
-    Ok(rendered)
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_chat_template_to(
+    messages: Vec<IndexMap<String, MessageContent>>,
+    add_generation_prompt: bool,
+    enable_thinking: Option<bool>,
+    reasoning_effort: Option<ReasoningEffort>,
+    template: &ChatTemplateValue,
+    bos_tok: Option<String>,
+    eos_tok: Option<String>,
+    unk_tok: Option<String>,
+    tools: Vec<Tool>,
+) -> Result<String> {
+    ChatTemplateFormat {
+        template: resolve_chat_template(template, &tools)?,
+        bos_tok,
+        eos_tok,
+        unk_tok,
+        add_generation_prompt,
+        enable_thinking,
+        reasoning_effort,
+        rendered_at: chrono::Local::now().to_rfc3339(),
+        messages_action: super::processing::MessagesAction::Keep,
+        tool_output_special_tokens: Default::default(),
+    }
+    .render(messages, tools)
 }
 
 #[cfg(test)]
@@ -921,6 +960,57 @@ mod tests {
             ("role".to_string(), Either::Left("user".to_string())),
             ("content".to_string(), Either::Left(text.to_string())),
         ])
+    }
+
+    #[test]
+    fn retained_format_uses_its_original_clock_and_content_conversion() {
+        let format: super::ChatTemplateFormat = serde_json::from_value(serde_json::json!({
+            "template": "{{ strftime_now('%Y-%m-%d %H:%M %z') }}|{{ date_string }}|{{ messages[0]['content'] }}",
+            "bos_tok": null, "eos_tok": null, "unk_tok": null,
+            "add_generation_prompt": true, "enable_thinking": false,
+            "reasoning_effort": null, "rendered_at": "2001-02-03T04:05:06+12:00",
+            "messages_action": "FlattenOnlyText"
+        })).unwrap();
+        let message = IndexMap::from([
+            ("role".into(), Either::Left("user".into())),
+            (
+                "content".into(),
+                Either::Right(vec![IndexMap::from([
+                    ("type".into(), serde_json::json!("text")),
+                    ("text".into(), serde_json::json!("<gate> & water")),
+                ])]),
+            ),
+        ]);
+        let restored: super::ChatTemplateFormat =
+            serde_json::from_slice(&serde_json::to_vec(&format).unwrap()).unwrap();
+        assert_eq!(
+            restored.render(vec![message], vec![]).unwrap(),
+            "2001-02-03 04:05 +1200|03, February, 2001|<gate> & water"
+        );
+    }
+
+    #[test]
+    fn retained_format_defuses_tool_control_tokens_after_serialization() {
+        let mut format: super::ChatTemplateFormat = serde_json::from_value(serde_json::json!({
+            "template": "{{ messages[0]['content'] }}",
+            "bos_tok": null, "eos_tok": null, "unk_tok": null,
+            "add_generation_prompt": true, "enable_thinking": false,
+            "reasoning_effort": null, "rendered_at": "2001-02-03T04:05:06+12:00"
+        }))
+        .unwrap();
+        format
+            .tool_output_special_tokens
+            .insert(b"<tool_call>".to_vec());
+        let restored: super::ChatTemplateFormat =
+            serde_json::from_slice(&serde_json::to_vec(&format).unwrap()).unwrap();
+        let message = IndexMap::from([
+            ("role".into(), Either::Left("tool".into())),
+            ("content".into(), Either::Left("result: <tool_call>".into())),
+        ]);
+        assert_eq!(
+            restored.render(vec![message], vec![]).unwrap(),
+            "result: <\u{FDD0}tool_call>"
+        );
     }
 
     #[test]
@@ -1324,19 +1414,25 @@ mod tests {
     }
 
     #[test]
-    fn detects_templates_that_walk_tool_call_arguments() {
-        assert!(super::iterates_tool_call_arguments(
-            "{%- for k, v in tool_call.arguments|items %}"
-        ));
-        assert!(super::iterates_tool_call_arguments(
-            "{%- for k, v in tool_call.arguments | items %}"
-        ));
-        assert!(super::iterates_tool_call_arguments(
-            "{% for k, v in tool_call.arguments.items() %}"
-        ));
-        assert!(!super::iterates_tool_call_arguments(
-            "{{ tool_call.arguments | tojson }}"
-        ));
+    fn templates_that_walk_tool_call_arguments_receive_mappings() {
+        for expression in ["arguments|items", "arguments | items", "arguments.items()"] {
+            let template = ChatTemplateValue(Either::Left(format!(
+                "{{% set tool_call = messages[0]['tool_calls'][0]['function'] %}}{{% for k, v in tool_call.{expression} %}}{{{{ k }}}}={{{{ v }}}}{{% endfor %}}"
+            )));
+            let rendered = apply_chat_template_to(
+                vec![assistant_message_with_tool_calls()],
+                false,
+                None,
+                None,
+                &template,
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(rendered, "city=Boston");
+        }
     }
 
     #[test]

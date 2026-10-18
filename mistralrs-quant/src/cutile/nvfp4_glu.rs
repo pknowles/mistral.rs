@@ -6,7 +6,6 @@
 #[cutile::module]
 mod kernels {
     use cutile::core::*;
-    use cutile::cutile_compiler;
 
     const BLOCK: i32 = 16;
     const FP4_MAX: f32 = 6.0;
@@ -14,7 +13,9 @@ mod kernels {
     const FP8_MAX: f32 = 448.0;
     const SILU: i32 = 0;
     const RELU: i32 = 2;
-    const LOG2_E: f32 = std::f32::consts::LOG2_E;
+    // cuTile only folds literal consts, so spell out std::f32::consts::LOG2_E
+    #[allow(clippy::approx_constant)]
+    const LOG2_E: f32 = 1.442_695_040_888_963_4_f32;
 
     #[cutile::entry(unchecked_accesses = true)]
     unsafe fn quantize_bf16<
@@ -331,17 +332,17 @@ mod kernels {
     }
 }
 
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use candle_core::{CudaStorage, DType, Device, Layout, Result, Shape, Storage, Tensor};
 use cutile::core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
+use cutile::cutile_compiler::specialization::{DivHint, SpecializationBits};
 use cutile::tensor::IntoPartition;
-use cutile::tile_kernel::{contains_cuda_function, CompileOptions, TileKernel};
+use cutile::tile_kernel::{contains_cuda_function, CompileOptions, TileFunctionKey, TileKernel};
 use float8::F8E4M3;
 use half::{bf16, f16};
 
@@ -363,6 +364,23 @@ const WARMUP_ACTIVATIONS: [GluActivationType; 3] = [
     GluActivationType::Relu,
     GluActivationType::Sigmoid,
 ];
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WarmupKey {
+    context: usize,
+    ordinal: usize,
+    dtype: DType,
+    activation: i32,
+    output: SpecializationBits,
+    global: SpecializationBits,
+    pointer_hints: [DivHint; 3],
+    scalar_hints: [DivHint; 5],
+}
+
+fn warmed_kernels() -> &'static Mutex<HashMap<WarmupKey, TileFunctionKey>> {
+    static WARMED: OnceLock<Mutex<HashMap<WarmupKey, TileFunctionKey>>> = OnceLock::new();
+    WARMED.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub(crate) struct GluQuantArgs<'a> {
     pub gate: &'a Tensor,
@@ -521,10 +539,28 @@ pub(crate) fn launch(
                         vec![packed_columns as i32, 1],
                     )
                 };
+                let warmup_key = WarmupKey {
+                    context: stream.context().cu_ctx() as usize,
+                    ordinal,
+                    dtype: args.gate.dtype(),
+                    activation: args.activation as i32,
+                    output: output.spec().clone(),
+                    global: global.spec().clone(),
+                    pointer_hints: [scale_address, gate_address, value_address]
+                        .map(|pointer| DivHint::from_ptr(pointer as CUdeviceptr)),
+                    scalar_hints: [
+                        rows,
+                        columns,
+                        scale_columns,
+                        gate_stride,
+                        value_matrix.row_stride,
+                    ]
+                    .map(|value| DivHint::from_value(value as i32)),
+                };
                 let output = output
                     .partition([QUANT_ROWS, QUANT_K / 2])
                     .map([1, 1], blocks);
-                unsafe {
+                let launcher = unsafe {
                     $kernel(
                         output,
                         DevicePointer::<f8e4m3fn>::from_cu_deviceptr(scale_address as CUdeviceptr),
@@ -539,19 +575,22 @@ pub(crate) fn launch(
                     )
                 }
                 .generics(generics.clone())
-                .compile_options(compile_options.clone())
+                .compile_options(compile_options.clone());
+                (launcher, warmup_key)
             };
+            let (launcher, warmup_key) = make_launcher();
             if compile_only {
                 catch_cutile_panic("NVFP4 GLU compile", || {
-                    make_launcher().compile_on(&cutile_stream).map_err(|error| {
+                    launcher.compile_on(&cutile_stream).map_err(|error| {
                         candle_core::Error::msg(format!(
                             "cuTile NVFP4 GLU compile failed: {error:?}"
                         ))
                     })
                 })?;
-            } else {
+                // cuTile key resolution synchronizes the stream, so keep it outside inference and capture.
                 let key = catch_cutile_panic("NVFP4 GLU specialization", || {
                     make_launcher()
+                        .0
                         .l1_cache_key_on(&cutile_stream)
                         .map_err(|error| {
                             candle_core::Error::msg(format!(
@@ -559,12 +598,19 @@ pub(crate) fn launch(
                             ))
                         })
                 })?;
+                warmed_kernels().lock().unwrap().insert(warmup_key, key);
+            } else {
                 // Never compile a missing specialization during inference or graph capture.
-                if !contains_cuda_function(&key) {
+                let warmed = warmed_kernels()
+                    .lock()
+                    .unwrap()
+                    .get(&warmup_key)
+                    .is_some_and(contains_cuda_function);
+                if !warmed {
                     return Ok(None);
                 }
                 catch_cutile_panic("NVFP4 GLU launch", || unsafe {
-                    make_launcher().async_on(&cutile_stream).map_err(|error| {
+                    launcher.async_on(&cutile_stream).map_err(|error| {
                         candle_core::Error::msg(format!(
                             "cuTile NVFP4 GLU launch failed: {error:?}"
                         ))
@@ -617,9 +663,17 @@ pub(super) fn warm_common(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::PoisonError;
+
     use super::*;
 
     static CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    // NVFP4 needs a CUDA 13.3+ toolchain, so older CI lanes skip these instead of failing
+    fn nvfp4_device() -> Result<Option<Device>> {
+        let device = Device::new_cuda(0)?;
+        Ok(nvfp4_supported(device.as_cuda_device()?).then_some(device))
+    }
 
     const CASES: [(usize, usize, usize, usize); 6] = [
         (1, 16, 0, 0),
@@ -740,8 +794,12 @@ mod tests {
 
     #[test]
     fn fused_quantization_matches_separate_glu_for_tail_and_strided_inputs() -> Result<()> {
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         for dtype in [DType::BF16, DType::F16] {
             for (rows, columns, padding, offset) in CASES {
                 let (gate, value) = fixture(rows, columns, padding, offset, dtype, &device)?;
@@ -762,8 +820,12 @@ mod tests {
     #[test]
     fn finite_16_bit_gate_patterns_match_separate_nonlinear_glu() -> Result<()> {
         const SIDE: usize = 256;
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         let global = Tensor::from_vec(vec![2.0f32], 1, &device)?;
         for dtype in [DType::BF16, DType::F16] {
             let values: Vec<f32> = (0..=u16::MAX)
@@ -797,8 +859,12 @@ mod tests {
 
         const ROWS: usize = 33;
         const COLUMNS: usize = 272;
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         let cuda = device.as_cuda_device()?;
         let stream = cuda.cuda_stream();
         let data: Vec<f32> = (0..ROWS * COLUMNS * 2)
@@ -885,8 +951,12 @@ mod tests {
     #[test]
     fn unregistered_stride_metadata_falls_back_until_explicitly_warmed() -> Result<()> {
         const COLUMNS: usize = 368;
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         let (gate, value) = fixture(3, COLUMNS, 3, 1, DType::BF16, &device)?;
         let global = Tensor::from_vec(vec![0.0f32, 2.0], 2, &device)?.narrow(0, 1, 1)?;
         assert_eq!(global.layout().start_offset(), 1);
@@ -913,8 +983,12 @@ mod tests {
         const COLUMNS: usize = 80;
         const OUTPUT: usize = 7;
         const GLOBAL: f32 = 0.375;
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         for dtype in [DType::BF16, DType::F16] {
             let weights = Tensor::from_vec(
                 vec![0x42u8; OUTPUT * COLUMNS / 2],
@@ -1047,8 +1121,12 @@ mod tests {
     fn common_packed_warmup_covers_contiguous_inputs_without_compiling() -> Result<()> {
         const ROWS: usize = 33;
         const COLUMNS: usize = 272;
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         for dtype in [DType::BF16, DType::F16] {
             let (gate, value) = fixture(ROWS, COLUMNS, 0, 0, dtype, &device)?;
             let gate = gate.contiguous()?;
@@ -1084,8 +1162,12 @@ mod tests {
         const COLUMNS: usize = 272;
         const OUTPUT: usize = 7;
         const GLOBAL: f32 = 0.375;
-        let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-        let device = Device::new_cuda(0)?;
+        let _gpu_guard = CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(device) = nvfp4_device()? else {
+            return Ok(());
+        };
         let cuda = device.as_cuda_device()?;
         let stream = cuda.cuda_stream();
         for dtype in [DType::BF16, DType::F16] {

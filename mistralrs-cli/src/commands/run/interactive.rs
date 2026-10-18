@@ -285,6 +285,7 @@ async fn oneshot_text(mistralrs: Arc<MistralRs>, ctx: OneshotCtx, text: String) 
     let req = Request::Normal(Box::new(NormalRequest {
         id: mistralrs.next_request_id(),
         queued_at: None,
+        prompt_observer: None,
         messages: request_messages,
         sampling_params: sampling_params.clone(),
         seed: None,
@@ -468,6 +469,7 @@ async fn oneshot_multimodal(mistralrs: Arc<MistralRs>, ctx: OneshotCtx, input: O
     let req = Request::Normal(Box::new(NormalRequest {
         id: mistralrs.next_request_id(),
         queued_at: None,
+        prompt_observer: None,
         messages: request_messages,
         sampling_params: sampling_params.clone(),
         seed: None,
@@ -968,6 +970,7 @@ async fn text_interactive_mode(
         let req = Request::Normal(Box::new(NormalRequest {
             id: mistralrs.next_request_id(),
             queued_at: None,
+            prompt_observer: None,
             messages: request_messages,
             sampling_params: sampling_params.clone(),
             seed: None,
@@ -1754,6 +1757,7 @@ async fn multimodal_interactive_mode(
         let req = Request::Normal(Box::new(NormalRequest {
             id: mistralrs.next_request_id(),
             queued_at: None,
+            prompt_observer: None,
             messages: request_messages,
             sampling_params: sampling_params.clone(),
             seed: None,
@@ -1915,6 +1919,7 @@ async fn diffusion_interactive_mode(
         let req = Request::Normal(Box::new(NormalRequest {
             id: 0,
             queued_at: None,
+            prompt_observer: None,
             messages: RequestMessage::ImageGeneration {
                 prompt: prompt.to_string(),
                 format: ImageGenerationResponseFormat::Url,
@@ -2040,6 +2045,7 @@ async fn speech_interactive_mode(
         let req = Request::Normal(Box::new(NormalRequest {
             id: 0,
             queued_at: None,
+            prompt_observer: None,
             messages: RequestMessage::SpeechGeneration {
                 prompt: prompt.to_string(),
             },

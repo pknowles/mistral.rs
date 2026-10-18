@@ -1,7 +1,7 @@
-#![cfg(all(feature = "cuda", target_family = "unix"))]
+#![cfg(feature = "cuda")]
 
 use candle_core::{DType, Device, Result, Tensor};
-use mistralrs_paged_attn::paged_attention;
+use mistralrs_paged_attn::{kv_scale_update, paged_attention};
 
 const NUM_HEADS: usize = 40;
 const KV_HEADS: usize = 8;
@@ -18,6 +18,33 @@ const CASES: [(usize, usize); 6] = [
     (32, 1024),
 ];
 const TOLERANCE: f32 = 0.01;
+
+#[test]
+fn kv_scale_update_covers_the_last_partial_block() -> Result<()> {
+    const ELEMENTS: usize = 1025;
+    const SCALE_TOLERANCE: f32 = 4.0 * f32::EPSILON;
+    let device = Device::new_cuda(0)?;
+    for dtype in [DType::BF16, DType::F16, DType::F32] {
+        let mut keys = vec![0.0f32; ELEMENTS];
+        let mut values = vec![0.0f32; ELEMENTS];
+        keys[ELEMENTS - 1] = -480.0;
+        values[ELEMENTS - 1] = 720.0;
+        let keys = Tensor::from_vec(keys, ELEMENTS, &device)?.to_dtype(dtype)?;
+        let values = Tensor::from_vec(values, ELEMENTS, &device)?.to_dtype(dtype)?;
+        let k_scale = Tensor::zeros(1, DType::F32, &device)?;
+        let v_scale = Tensor::zeros(1, DType::F32, &device)?;
+        kv_scale_update(&keys, &values, &k_scale, &v_scale)?;
+        assert!(
+            (k_scale.to_vec1::<f32>()?[0] - 2.0).abs() <= SCALE_TOLERANCE,
+            "{dtype:?}"
+        );
+        assert!(
+            (v_scale.to_vec1::<f32>()?[0] - 3.0).abs() <= SCALE_TOLERANCE,
+            "{dtype:?}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn paged_attention_handles_context_length_reordering() -> Result<()> {

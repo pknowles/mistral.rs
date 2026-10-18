@@ -565,7 +565,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                     image_urls,
                 } in batch
                 {
-                    let tokens = processor
+                    let (tokens, prompt, _) = processor
                         .process(
                             &*target,
                             vec![IndexMap::from([
@@ -611,7 +611,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                         None => None,
                     };
                     seqs.push(new_dummy_seq(
-                        tokens,
+                        (tokens, prompt),
                         dummy_sender.clone(),
                         dummy_sampler.clone(),
                         dummy_group.clone(),

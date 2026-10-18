@@ -80,7 +80,7 @@ pub(crate) fn sinks_backend_supports(
     }
 
     match location {
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        #[cfg(feature = "cuda")]
         DeviceLocation::Cuda { .. } => true,
         #[cfg(feature = "metal")]
         DeviceLocation::Metal { .. } => true,
@@ -112,7 +112,7 @@ fn sinks_attn_regular(
         return sinks_attn_cpu(q, k, v, sinks, mask, sdpa_params);
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     if q.device().is_cuda() {
         return mistralrs_paged_attn::flash_attn_sinks(
             q,
@@ -173,7 +173,7 @@ fn sinks_attn_varlen(
         candle_core::bail!("sinks varlen metadata does not match the query batch");
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     if device.is_cuda() {
         return mistralrs_paged_attn::flash_attn_sinks_varlen(
             q,
@@ -305,7 +305,7 @@ mod tests {
         assert!(!sinks_backend_supports(DType::F16, DeviceLocation::Cpu, 64));
         assert_eq!(
             sinks_backend_supports(DType::BF16, DeviceLocation::Cuda { gpu_id: 0 }, 128),
-            cfg!(all(feature = "cuda", target_family = "unix"))
+            cfg!(feature = "cuda")
         );
         assert_eq!(
             sinks_backend_supports(DType::F32, DeviceLocation::Metal { gpu_id: 0 }, 256),

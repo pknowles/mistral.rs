@@ -7,10 +7,10 @@ use candle_core::{DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use super::config::{KvCacheLayout, ModelConfigLike};
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 use crate::flashinfer::{register_fa3_prefill_caches, Fa3PrefillWorkspaceRegistration};
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 fn cuda_supports_fp8(device: &Device) -> bool {
     use candle_core::cuda::cudarc::driver::{result, sys};
 
@@ -83,14 +83,14 @@ impl PagedCacheType {
                 .and_then(Option::as_ref)
                 .unwrap_or(device);
             if layer_device.is_cuda() {
-                #[cfg(all(feature = "cuda", target_family = "unix"))]
+                #[cfg(feature = "cuda")]
                 if !cuda_supports_fp8(layer_device) {
                     return Err(
                         "FP8 KV cache requires CUDA compute capability 8.0 or newer and a matching CUDA build"
                             .to_string(),
                     );
                 }
-                #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+                #[cfg(not(feature = "cuda"))]
                 return Err("FP8 KV cache requires the CUDA paged-attention backend".to_string());
             } else if layer_device.is_metal() {
                 #[cfg(not(feature = "metal"))]
@@ -129,7 +129,7 @@ pub struct CacheConfig {
 pub type KVCache = (Tensor, Tensor);
 
 pub struct CacheEngine {
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     _fa3_prefill_workspaces: Fa3PrefillWorkspaceRegistration,
     fa3_prefill_num_sm_by_layer: Vec<Option<usize>>,
     gpu_cache: Arc<Mutex<Vec<KVCache>>>,
@@ -150,15 +150,15 @@ impl CacheEngine {
         let dtype = cache_config.cache_type.to_dtype(dtype);
         let gpu_cache =
             Self::allocate_gpu_cache(model_config, cache_config, dtype, device, layer_devices)?;
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        #[cfg(feature = "cuda")]
         let fa3_prefill_workspaces = register_fa3_prefill_caches(&gpu_cache)?;
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        #[cfg(feature = "cuda")]
         let fa3_prefill_num_sm_by_layer =
             Self::fa3_prefill_cache_coverage(model_config, cache_config, &gpu_cache)?;
-        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        #[cfg(not(feature = "cuda"))]
         let fa3_prefill_num_sm_by_layer = vec![None; model_config.num_layers()];
         Ok(Self {
-            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            #[cfg(feature = "cuda")]
             _fa3_prefill_workspaces: fa3_prefill_workspaces,
             fa3_prefill_num_sm_by_layer,
             gpu_cache: Arc::new(Mutex::new(gpu_cache)),
@@ -470,7 +470,7 @@ impl CacheEngine {
         Ok(gpu_cache)
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     fn fa3_prefill_cache_coverage(
         model_config: &dyn ModelConfigLike,
         cache_config: &CacheConfig,
@@ -611,7 +611,7 @@ mod tests {
         assert!(err.contains("not supported for MLA layer 0"));
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     #[test]
     fn fa3_prefill_coverage_requires_compatible_registered_caches() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {

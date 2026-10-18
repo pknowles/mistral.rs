@@ -650,10 +650,7 @@ pub mod text_models_inputs_processor {
         pub sliding_k: Option<FlashKMeta>,
         pub causal: bool,
         pub(crate) packed: bool,
-        #[cfg_attr(
-            not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")),
-            allow(dead_code)
-        )]
+        #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(dead_code))]
         pub(crate) varlen_segment_lens: Option<Vec<usize>>,
     }
 

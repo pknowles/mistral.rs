@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Once};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 use mistralrs_paged_attn::{
     fa3_fp8_decode, flashinfer_decode, gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
     Fa3DecodeParams, FlashInferDecodeScratch, KvCacheScales as FlashInferKvCacheScales,
@@ -9,9 +9,9 @@ use mistralrs_paged_attn::{
 };
 use mistralrs_paged_attn::{paged_attention, reshape_and_cache};
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 use crate::attention::sliding_window_left;
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 use crate::flashinfer::{
     fa3_device_num_sm, fa3_prefill_cache_num_sm, with_fa3_prefill_workspace, Fa3DecodeScheduleKey,
     Fa3DecodeView, Fa3PagedScheduleShape,
@@ -34,7 +34,7 @@ use crate::{
 
 static UNCALIBRATED_FP8_ATTENTION_WARNING: Once = Once::new();
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 struct Fa3DecodeCandidate {
     key: Fa3DecodeScheduleKey,
@@ -51,7 +51,7 @@ struct Fa3DecodeCandidate {
     has_noncausal_mm_context: bool,
 }
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 impl Fa3DecodeCandidate {
     fn schedule_key(self) -> Option<Fa3DecodeScheduleKey> {
         (self.query_dtype == DType::BF16
@@ -70,7 +70,7 @@ impl Fa3DecodeCandidate {
     }
 }
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 struct FlashInferDecodeCall<'call, 'ctx> {
     ctx: &'call PagedForwardCtx<'ctx>,
@@ -83,14 +83,14 @@ struct FlashInferDecodeCall<'call, 'ctx> {
 
 #[derive(Clone, Copy)]
 struct CacheScales<'a> {
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     attention: Fp8AttentionScales,
     k: Option<&'a Tensor>,
     v: Option<&'a Tensor>,
 }
 
 impl CacheScales<'_> {
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     fn flashinfer(self, key_cache: &Tensor) -> FlashInferKvCacheScales {
         if key_cache.dtype() == DType::F8E4M3 {
             FlashInferKvCacheScales {
@@ -194,7 +194,7 @@ fn cache_input_can_write_directly(tensor: &Tensor) -> Result<bool> {
     let row_stride = match *dims {
         [_, _, _] => stride[0],
         [batch, seq_len, _, _] => {
-            if !cfg!(all(feature = "cuda", target_family = "unix")) {
+            if !cfg!(feature = "cuda") {
                 return Ok(false);
             }
             let row_stride = if seq_len == 1 { stride[0] } else { stride[1] };
@@ -236,7 +236,7 @@ fn write_kv_cache(
     };
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
-            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            #[cfg(feature = "cuda")]
             {
                 reshape_and_cache_flashinfer(
                     key,
@@ -247,7 +247,7 @@ fn write_kv_cache(
                     scales.flashinfer(key_cache),
                 )
             }
-            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+            #[cfg(not(feature = "cuda"))]
             {
                 unreachable!("FlashInfer cache is only available with CUDA")
             }
@@ -275,7 +275,7 @@ fn gather_kv_cache_for_layout(
 ) -> Result<(Tensor, Tensor)> {
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
-            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            #[cfg(feature = "cuda")]
             {
                 gather_kv_cache_flashinfer(
                     key_cache,
@@ -287,7 +287,7 @@ fn gather_kv_cache_for_layout(
                     scales.flashinfer(key_cache),
                 )
             }
-            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+            #[cfg(not(feature = "cuda"))]
             {
                 unreachable!("FlashInfer cache is only available with CUDA")
             }
@@ -862,7 +862,7 @@ impl PagedAttention {
             (None, None)
         };
         CacheScales {
-            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            #[cfg(feature = "cuda")]
             attention: self.fp8_attention_scales,
             k,
             v,
@@ -1128,7 +1128,7 @@ impl PagedAttention {
             key_cache.as_ref().unwrap(),
             value_cache.as_ref().unwrap(),
         );
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        #[cfg(feature = "cuda")]
         let fa3_supported = fa3_prefill_cache_num_sm(
             key_cache.as_ref().unwrap(),
             value_cache.as_ref().unwrap(),
@@ -1138,7 +1138,7 @@ impl PagedAttention {
             block_size,
         )?
         .is_some();
-        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        #[cfg(not(feature = "cuda"))]
         let fa3_supported = false;
         let prefill_plan_input = PrefixPrefillPlanInput {
             device_is_cuda: tensors.query.device().is_cuda(),
@@ -1188,7 +1188,7 @@ impl PagedAttention {
             }
         }
         match prefill_plan {
-            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            #[cfg(feature = "cuda")]
             PrefixPrefillPlan::Fa3Fp8Paged => {
                 let output = self.run_fa3_paged_prefill(
                     ctx,
@@ -1442,7 +1442,7 @@ impl PagedAttention {
         prefix_attention_output_layout(output, tensors.attention_mask).map(Some)
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     fn run_fa3_paged_prefill(
         &self,
         ctx: &PagedForwardCtx<'_>,
@@ -1716,7 +1716,7 @@ impl PagedAttention {
                 &dev,
                 tensors.attention_mask,
             ),
-            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            #[cfg(feature = "cuda")]
             DecodePlan::FlashInfer(_) => self.run_flashinfer_decode(FlashInferDecodeCall {
                 ctx,
                 query: &query,
@@ -1857,7 +1857,7 @@ impl PagedAttention {
         )
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     fn try_run_fa3_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Option<Tensor>> {
         let FlashInferDecodeCall {
             ctx,
@@ -1945,7 +1945,7 @@ impl PagedAttention {
         Ok(Some(output))
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     fn run_flashinfer_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Tensor> {
         if let Some(output) = self.try_run_fa3_decode(call)? {
             return Ok(output);
@@ -2137,6 +2137,19 @@ impl PagedAttention {
         self.run_decode(&ctx, tensors, &mut key_cache, &mut value_cache, write_cache)
     }
 
+    /// Write key/value into the paged cache without running attention.
+    pub fn write_cache(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        key_cache: &mut Tensor,
+        value_cache: &mut Tensor,
+        slot_mapping: &Tensor,
+    ) -> Result<()> {
+        let scales = self.cache_scales(key_cache);
+        write_kv_cache(key, value, scales, key_cache, value_cache, slot_mapping)
+    }
+
     /// Standard paged attention forward: writes key/value to cache, then
     /// runs attention (Sdpa for prompt, paged kernel for decode).
     #[allow(clippy::too_many_arguments)]
@@ -2222,7 +2235,7 @@ mod tests {
         assert!(checked_sequence_token_count(&[usize::MAX, 1]).is_err());
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     fn supported_fa3_decode_candidate() -> Fa3DecodeCandidate {
         Fa3DecodeCandidate {
             key: Fa3PagedScheduleShape {
@@ -2252,7 +2265,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     #[test]
     fn fa3_decode_candidate_requires_supported_full_decode() {
         let supported = supported_fa3_decode_candidate();
@@ -2288,7 +2301,7 @@ mod tests {
         assert_eq!(speculative.schedule_key(), Some(speculative.key));
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     #[test]
     fn fa3_decode_schedule_lookup_is_exact() {
         let candidate = supported_fa3_decode_candidate();
@@ -2324,7 +2337,7 @@ mod tests {
         assert_eq!(q_scale.to_scalar::<f32>()?, scales.q);
         assert_eq!(k_scale.to_scalar::<f32>()?, scales.k);
         assert_eq!(v_scale.to_scalar::<f32>()?, scales.v);
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        #[cfg(feature = "cuda")]
         {
             let fp8_cache = Tensor::zeros((1,), DType::F8E4M3, &Device::Cpu)?;
             let flashinfer_scales = attention.cache_scales(&fp8_cache).flashinfer(&fp8_cache);
@@ -2359,7 +2372,7 @@ mod tests {
         assert_eq!(cache_input_shape(&row_strided)?, (6, 2, 4));
         assert_eq!(
             cache_input_can_write_directly(&row_strided)?,
-            cfg!(all(feature = "cuda", target_family = "unix"))
+            cfg!(feature = "cuda")
         );
 
         let row_strided = packed

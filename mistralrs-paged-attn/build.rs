@@ -3,21 +3,21 @@ use anyhow::Result;
 #[cfg(feature = "metal")]
 include!("src/metal/kernels/source_set.rs");
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 const CUDA_NVCC_FLAGS: Option<&'static str> = option_env!("CUDA_NVCC_FLAGS");
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 const FA3_CUTLASS_COMMIT: &str = "62750a2b75c802660e4894434dc55e839f322277";
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 const FA3_SOURCES: [&str; 4] = [
     "src/cuda/fa3/fa3_decode_api.cu",
     "third_party/flash-attention/hopper/instantiations/flash_fwd_hdim256_e4m3_paged_split_sm90.cu",
     "third_party/flash-attention/hopper/flash_fwd_combine.cu",
     "third_party/flash-attention/hopper/flash_prepare_scheduler.cu",
 ];
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 const CUDA_BUILD_ROOT_ENV: &str = "MISTRALRS_CUDA_BUILD_ROOT";
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 fn cuda_build_dir(out_dir: &std::path::Path, component: &str) -> std::path::PathBuf {
     println!("cargo:rerun-if-env-changed={CUDA_BUILD_ROOT_ENV}");
     let Some(root) = std::env::var_os(CUDA_BUILD_ROOT_ENV) else {
@@ -30,7 +30,7 @@ fn cuda_build_dir(out_dir: &std::path::Path, component: &str) -> std::path::Path
     build_dir
 }
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 fn prepare_cuda_archive(path: std::path::PathBuf) -> std::path::PathBuf {
     if std::env::var_os(CUDA_BUILD_ROOT_ENV).is_some() {
         // Shared objects can be newer than this Cargo build directory's archive.
@@ -43,7 +43,7 @@ fn prepare_cuda_archive(path: std::path::PathBuf) -> std::path::PathBuf {
     path
 }
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 fn cuda_header_hash(dir: &str, excluded_dirs: &[&str]) -> Result<u64> {
     use std::path::Path;
 
@@ -90,7 +90,7 @@ fn cuda_header_hash(dir: &str, excluded_dirs: &[&str]) -> Result<u64> {
     Ok(hash)
 }
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
+#[cfg(feature = "cuda")]
 fn main() -> Result<()> {
     use std::path::PathBuf;
 
@@ -154,7 +154,13 @@ fn main() -> Result<()> {
         .arg("--use_fast_math")
         .arg("--verbose")
         .arg("--compiler-options")
-        .arg("-fPIC")
+        .arg(
+            if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+                "/Zc:preprocessor"
+            } else {
+                "-fPIC"
+            },
+        )
         .arg(&header_hash_arg);
 
     let compute_cap = builder.get_compute_cap().unwrap_or(80);
@@ -174,6 +180,17 @@ fn main() -> Result<()> {
     println!("cargo:info={builder:?}");
 
     let target = std::env::var("TARGET").unwrap();
+    if target == "aarch64-pc-windows-msvc" {
+        let lib_dir = cudaforge::CudaToolkit::detect()?
+            .lib_dir
+            .with_file_name("arm64");
+        anyhow::ensure!(
+            lib_dir.is_dir(),
+            "CUDA ARM64 libraries missing at {}",
+            lib_dir.display()
+        );
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    }
     // https://github.com/EricLBuehler/mistral.rs/issues/588
     let out_file = if target.contains("msvc") {
         // Windows case
@@ -185,7 +202,7 @@ fn main() -> Result<()> {
         .build_lib(prepare_cuda_archive(out_file))
         .expect("Build paged attention lib failed!");
 
-    let using_fa3_fp8_paged = compute_cap == 90;
+    let using_fa3_fp8_paged = compute_cap == 90 && !target.contains("msvc");
     if using_fa3_fp8_paged {
         let fa3_header_hash = cuda_header_hash("third_party/flash-attention", &[])?
             .wrapping_mul(0x100000001b3)
@@ -264,7 +281,7 @@ fn main() -> Result<(), String> {
     mistralrs_metal_compile::compile_metallibs(&PAGED_ATTENTION_METAL_SOURCE_SET)
 }
 
-#[cfg(not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")))]
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
 fn main() -> Result<()> {
     // Declare expected cfg values for check-cfg lint
     println!("cargo::rustc-check-cfg=cfg(has_fp8)");

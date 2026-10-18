@@ -62,11 +62,7 @@ pub(crate) use backends::{
 pub(crate) const ATTENTION_CHUNK_SIZE: usize = 1024;
 pub(crate) const FLASH_ATTN_NATIVE_MAX_GQA_GROUP: usize = 8;
 
-#[cfg(any(
-    feature = "flash-attn",
-    feature = "flash-attn-v3",
-    all(feature = "cuda", target_family = "unix")
-))]
+#[cfg(any(feature = "flash-attn", feature = "flash-attn-v3", feature = "cuda"))]
 pub(crate) fn sliding_window_left(sliding_window: Option<usize>) -> Option<usize> {
     sliding_window.map(|window| window.saturating_sub(1))
 }
@@ -694,11 +690,7 @@ mod tests {
         assert_close(&out, &expected)
     }
 
-    #[cfg(any(
-        feature = "flash-attn",
-        feature = "flash-attn-v3",
-        all(feature = "cuda", target_family = "unix")
-    ))]
+    #[cfg(any(feature = "flash-attn", feature = "flash-attn-v3", feature = "cuda"))]
     #[test]
     fn sliding_window_capacity_converts_to_left_distance() {
         assert_eq!(sliding_window_left(None), None);

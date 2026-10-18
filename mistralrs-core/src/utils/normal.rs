@@ -67,46 +67,36 @@ impl TryIntoDType for DType {
 }
 
 #[cfg(feature = "cuda")]
-fn get_dtypes() -> Vec<DType> {
-    use std::process::Command;
+fn get_dtypes(devices: &[&Device]) -> candle_core::Result<Vec<DType>> {
+    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
+    use candle_core::cuda_backend::WrapErr;
 
     // >= is supported
-    const MIN_BF16_CC: usize = 800;
+    const MIN_BF16_CC: i32 = 800;
     // >= is supported
-    const MIN_F16_CC: usize = 530;
+    const MIN_F16_CC: i32 = 530;
 
-    let raw_out = Command::new("nvidia-smi")
-        .arg("--query-gpu=compute_cap")
-        .arg("--format=csv")
-        .output()
-        .expect("Failed to run `nvidia-smi` but CUDA is selected.")
-        .stdout;
-    let out = String::from_utf8(raw_out).expect("`nvidia-smi` did not return valid utf8");
-    // This reduce-min will always return at least one value so unwrap is OK.
-    let min_cc = out
-        .split('\n')
-        .skip(1)
-        .filter(|cc| !cc.trim().is_empty())
-        .map(|cc| cc.trim().parse::<f32>().unwrap())
-        .reduce(|a, b| if a < b { a } else { b })
-        .unwrap();
-    debug!("Detected minimum CUDA compute capability {min_cc}");
-    // 7.5 -> 750
-    #[allow(clippy::cast_possible_truncation)]
-    let min_cc = (min_cc * 100.) as usize;
-
-    let mut dtypes = Vec::new();
-    if min_cc >= MIN_BF16_CC {
-        dtypes.push(DType::BF16);
-    } else {
-        debug!("Skipping BF16 because CC < 8.0");
+    let mut dtypes = get_dtypes_non_cuda();
+    for device in devices {
+        if let Device::Cuda(device) = device {
+            let stream = device.cuda_stream();
+            let context = stream.context();
+            let major = context
+                .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+                .w()?;
+            let minor = context
+                .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+                .w()?;
+            let compute_capability = major * 100 + minor * 10;
+            debug!("Selected CUDA device compute capability {major}.{minor}");
+            dtypes.retain(|dtype| match dtype {
+                DType::BF16 => compute_capability >= MIN_BF16_CC,
+                DType::F16 => compute_capability >= MIN_F16_CC,
+                _ => false,
+            });
+        }
     }
-    if min_cc >= MIN_F16_CC {
-        dtypes.push(DType::F16);
-    } else {
-        debug!("Skipping F16 because CC < 5.3");
-    }
-    dtypes
+    Ok(dtypes)
 }
 
 fn get_dtypes_non_cuda() -> Vec<DType> {
@@ -114,8 +104,8 @@ fn get_dtypes_non_cuda() -> Vec<DType> {
 }
 
 #[cfg(not(feature = "cuda"))]
-fn get_dtypes() -> Vec<DType> {
-    get_dtypes_non_cuda()
+fn get_dtypes(_devices: &[&Device]) -> candle_core::Result<Vec<DType>> {
+    Ok(get_dtypes_non_cuda())
 }
 
 fn determine_auto_dtype_all(devices: &[&Device]) -> candle_core::Result<DType> {
@@ -131,7 +121,7 @@ fn determine_auto_dtype_all(devices: &[&Device]) -> candle_core::Result<DType> {
         if devices.iter().all(|d| matches!(d, Device::Cpu)) {
             return Ok(DType::F32);
         }
-        let dev_dtypes = get_dtypes();
+        let dev_dtypes = get_dtypes(devices)?;
         for dtype in get_dtypes_non_cuda()
             .iter()
             .filter(|x| dev_dtypes.contains(x))

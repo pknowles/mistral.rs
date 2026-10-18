@@ -19,6 +19,18 @@ use tokio::sync::mpsc::Sender;
 
 pub type LlguidanceGrammar = llguidance::api::TopLevelGrammar;
 
+/// An awaited observation of the normal formatting and tokenization pass before generation.
+pub type PromptObserver = Arc<
+    dyn Fn(
+            &str,
+            &[u32],
+            Option<&crate::ChatTemplateFormat>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone, Serialize, Deserialize)]
 /// Control the constraint with llguidance.
 pub enum Constraint {
@@ -413,6 +425,8 @@ impl WebSearchOptions {
 /// - `return_raw_logits`: Return raw logits.
 /// - `truncate_sequence`: Whether to truncate the prompt if it exceeds the model's maximum context length.
 pub struct NormalRequest {
+    #[serde(skip)]
+    pub prompt_observer: Option<PromptObserver>,
     pub messages: RequestMessage,
     pub sampling_params: SamplingParams,
     /// Initializes an independent sampling stream for every generated choice.
@@ -508,6 +522,7 @@ impl NormalRequest {
             response,
             id,
             queued_at: None,
+            prompt_observer: None,
             tools,
             tool_choice,
             return_logprobs: false,

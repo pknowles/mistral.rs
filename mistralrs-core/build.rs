@@ -118,7 +118,13 @@ fn main() {
             .arg("--use_fast_math")
             .arg("--verbose")
             .arg("--compiler-options")
-            .arg("-fPIC")
+            .arg(
+                if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+                    "/Zc:preprocessor"
+                } else {
+                    "-fPIC"
+                },
+            )
             .arg(&header_hash_arg);
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
@@ -136,10 +142,12 @@ fn main() {
         }
 
         let target = std::env::var("TARGET").unwrap();
-
-        // CUDA 13.x CCCL headers require MSVC's conforming preprocessor.
-        if target.contains("msvc") {
-            builder = builder.arg("--compiler-options").arg("/Zc:preprocessor");
+        if target == "aarch64-pc-windows-msvc" {
+            let lib_dir = cudaforge::CudaToolkit::detect()
+                .expect("detecting CUDA toolkit")
+                .lib_dir
+                .with_file_name("arm64");
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
         }
 
         // https://github.com/EricLBuehler/mistral.rs/issues/588

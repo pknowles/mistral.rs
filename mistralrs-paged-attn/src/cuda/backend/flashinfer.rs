@@ -213,7 +213,7 @@ pub fn reshape_and_cache_flashinfer(
             value_ptr as *const core::ffi::c_void,
             key_cache_ptr as *const core::ffi::c_void,
             value_cache_ptr as *const core::ffi::c_void,
-            slot_ptr as *const core::ffi::c_long,
+            slot_ptr as *const i64,
             num_tokens as i32,
             num_heads as i32,
             head_size as i32,

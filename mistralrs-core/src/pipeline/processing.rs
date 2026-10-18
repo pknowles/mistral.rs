@@ -3,14 +3,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use either::Either;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     request::ReasoningEffort,
+    special_text::SpecialStrings,
     vision_models::{preprocessor_config::PreProcessorConfig, processor_config::ProcessorConfig},
     MessageContent, Pipeline, Tool,
 };
 
-use super::{chat_template::apply_chat_template_to, text_models_inputs_processor, InputsProcessor};
+use super::{
+    chat_template::{resolve_chat_template, ChatTemplateFormat},
+    text_models_inputs_processor, InputsProcessor,
+};
 
 /// Trait to create processors.
 pub trait ProcessorCreator {
@@ -20,8 +25,10 @@ pub trait ProcessorCreator {
     ) -> Arc<dyn Processor + Send + Sync>;
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub enum MessagesAction {
     // For idefics2, others which use the "new" openai format
+    #[default]
     Keep,
     // Gemma 4 is trained with audio after the instruction.
     KeepWithAudioAfterText,
@@ -44,7 +51,7 @@ pub trait Processor {
         enable_thinking: Option<bool>,
         reasoning_effort: Option<ReasoningEffort>,
         tools: Vec<Tool>,
-    ) -> Result<(Vec<u32>, String)> {
+    ) -> Result<(Vec<u32>, String, Option<ChatTemplateFormat>)> {
         // for message in messages.iter_mut() {
         //     if message["role"].as_ref().left().is_some_and(|x| x == "tool") {
         //         message["role"] = Either::Left("ipython".to_string());
@@ -55,15 +62,15 @@ pub trait Processor {
         //     }
         // }
 
-        let prompt = apply_chat_template(
+        let format = chat_template_format(
             pipeline,
-            messages,
             add_generation_prompt,
             enable_thinking,
             reasoning_effort,
             self.template_action(),
-            tools,
+            &tools,
         )?;
+        let prompt = format.render(messages, tools)?;
         // Templates own their special tokens (HF apply_chat_template convention): when
         // the rendered prompt already starts with bos, letting the tokenizer add it
         // again doubles it (gemma-family tokenizers add bos in their post-processor).
@@ -79,7 +86,7 @@ pub trait Processor {
             })?
             .encode_fast(prompt.clone(), add_special_tokens)
             .map_err(anyhow::Error::msg)?;
-        Ok((encoding.get_ids().to_vec(), prompt))
+        Ok((encoding.get_ids().to_vec(), prompt, Some(format)))
     }
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor>;
     fn retain_prefix_cached_images(&self) -> bool {
@@ -127,16 +134,11 @@ fn move_audio_after_text(content: MessageContent) -> MessageContent {
     Either::Right(non_audio)
 }
 
-pub(crate) fn apply_chat_template(
-    pipeline: &dyn Pipeline,
+pub(crate) fn prepare_messages(
     messages: Vec<IndexMap<String, MessageContent>>,
-    add_generation_prompt: bool,
-    enable_thinking: Option<bool>,
-    reasoning_effort: Option<ReasoningEffort>,
     action: MessagesAction,
-    tools: Vec<Tool>,
-) -> Result<String> {
-    let messages = match action {
+) -> Vec<IndexMap<String, MessageContent>> {
+    match action {
         MessagesAction::Keep => messages,
         MessagesAction::KeepWithAudioAfterText => messages
             .into_iter()
@@ -174,8 +176,17 @@ pub(crate) fn apply_chat_template(
                 })
                 .collect()
         }
-    };
+    }
+}
 
+fn chat_template_format(
+    pipeline: &dyn Pipeline,
+    add_generation_prompt: bool,
+    enable_thinking: Option<bool>,
+    reasoning_effort: Option<ReasoningEffort>,
+    action: MessagesAction,
+    tools: &[Tool],
+) -> Result<ChatTemplateFormat> {
     let chat_template = pipeline
         .get_chat_template()
         .with_context(|| "`apply_chat_template` expects the pipeline to have a chat template.")?;
@@ -188,17 +199,41 @@ pub(crate) fn apply_chat_template(
     let eos_tok = chat_template.eos_token.as_ref().map(extract_token_string);
     let unk_tok = chat_template.unk_token.as_ref().map(extract_token_string);
 
-    apply_chat_template_to(
-        messages,
+    Ok(ChatTemplateFormat {
+        template: resolve_chat_template(template, tools)?,
         add_generation_prompt,
         enable_thinking,
         reasoning_effort,
-        template,
         bos_tok,
         eos_tok,
         unk_tok,
-        tools,
-    )
+        rendered_at: chrono::Local::now().to_rfc3339(),
+        messages_action: action,
+        tool_output_special_tokens: pipeline
+            .tokenizer()
+            .map(|tokenizer| SpecialStrings::for_tokenizer(&tokenizer).token_strings())
+            .unwrap_or_default(),
+    })
+}
+
+pub(crate) fn apply_chat_template(
+    pipeline: &dyn Pipeline,
+    messages: Vec<IndexMap<String, MessageContent>>,
+    add_generation_prompt: bool,
+    enable_thinking: Option<bool>,
+    reasoning_effort: Option<ReasoningEffort>,
+    action: MessagesAction,
+    tools: Vec<Tool>,
+) -> Result<String> {
+    chat_template_format(
+        pipeline,
+        add_generation_prompt,
+        enable_thinking,
+        reasoning_effort,
+        action,
+        &tools,
+    )?
+    .render(messages, tools)
 }
 
 pub struct BasicProcessor;

@@ -14,7 +14,13 @@ Use this page to check whether a prebuilt binary exists for your accelerator. If
 | Apple Silicon (macOS arm64) | Metal | yes |
 | Linux x86_64 / aarch64, no GPU | CPU | yes |
 | Windows x86_64 | CPU | yes |
+| Windows ARM64 + NVIDIA RTX Spark | CUDA, source build with toolkit 13.4+ | no |
 | Intel Mac, unlisted GPU | source build | no |
+
+Windows RTX Spark memory admission uses `cuMemGetInfo` for the combined
+dedicated/shared CUDA budget. NVML's dedicated-memory figure describes only the
+carveout, and free CPU RAM does not describe the CUDA budget. See NVIDIA's
+[Windows UMA guidance](https://docs.nvidia.com/rtx-spark/rtx-spark-porting-guide/latest/uma/umacuda.html).
 
 ## NVIDIA compute capabilities
 

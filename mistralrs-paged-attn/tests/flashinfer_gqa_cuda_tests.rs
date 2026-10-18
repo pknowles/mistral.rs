@@ -1,4 +1,4 @@
-#![cfg(all(feature = "cuda", target_family = "unix"))]
+#![cfg(feature = "cuda")]
 
 use candle_core::{DType, Device, Result, Storage, Tensor};
 use mistralrs_paged_attn::{
@@ -7,7 +7,7 @@ use mistralrs_paged_attn::{
 use std::sync::Mutex;
 
 const GROUP_SIZES: [usize; 6] = [3, 4, 5, 6, 7, 8];
-const HEAD_DIMS: [usize; 2] = [64, 128];
+const HEAD_DIMS: [usize; 3] = [64, 128, 256];
 const BATCH: usize = 2;
 const KV_HEADS: usize = 3;
 const PAGE_SIZE: usize = 16;

@@ -306,7 +306,7 @@ impl Engine {
         };
         let mut added_seq = false;
 
-        let (mut prompt_tokens, prompt_text) = match request.messages {
+        let (mut prompt_tokens, prompt_text, prompt_format) = match request.messages {
             RequestMessage::Chat {
                 messages,
                 enable_thinking,
@@ -372,10 +372,11 @@ impl Engine {
                         .get_ids()
                         .to_vec(),
                     text,
+                    None,
                 )
             }
             RequestMessage::ImageGeneration { prompt, .. }
-            | RequestMessage::SpeechGeneration { prompt } => (vec![u32::MAX], prompt),
+            | RequestMessage::SpeechGeneration { prompt } => (vec![u32::MAX], prompt, None),
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
@@ -404,7 +405,7 @@ impl Engine {
                 let prompt = tokenizer
                     .decode(&it, false)
                     .map_err(|e| anyhow::Error::msg(e.to_string()));
-                (it, handle_seq_error!(prompt, request.response))
+                (it, handle_seq_error!(prompt, request.response), None)
             }
         };
         if prompt_tokens.is_empty() {
@@ -471,6 +472,20 @@ impl Engine {
 
                 prompt_tokens = prompt_tokens[..max_len].to_vec();
                 warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.", request.id);
+            }
+        }
+
+        if let Some(observer) = request.prompt_observer.take() {
+            if let Err(error) = observer(&prompt_text, &prompt_tokens, prompt_format.as_ref()).await
+            {
+                request
+                    .response
+                    .send(Response::InternalError(
+                        error.context("observing generation input").into(),
+                    ))
+                    .await
+                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
+                return;
             }
         }
 
@@ -1036,7 +1051,7 @@ impl Engine {
                     tools,
                 );
                 let toks = match template {
-                    Ok((toks, _)) => toks,
+                    Ok((toks, _, _)) => toks,
                     Err(e) => {
                         request
                             .response
