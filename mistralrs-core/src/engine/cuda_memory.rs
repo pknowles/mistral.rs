@@ -20,6 +20,127 @@ const TRIM_COOLDOWN: Duration = Duration::from_secs(1);
 const DECODE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(250);
 pub(super) const GRAPH_RECLAIM_BATCH_SIZE: usize = 16;
 
+/// A launch-time estimate for bounded prompt execution, not a device reservation.
+#[derive(Clone, Debug)]
+pub struct CudaPromptMemoryBudget {
+    pub device: String,
+    pub pool_used_bytes: usize,
+    pub attention_workspace_bytes: usize,
+    pub allocator_headroom_bytes: usize,
+    pub safety_headroom_bytes: usize,
+    pub additional_device_bytes: usize,
+    pub available_device_bytes: usize,
+}
+
+impl CudaPromptMemoryBudget {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.additional_device_bytes <= self.available_device_bytes,
+            "{} cannot serve the configured context and concurrency: {} bytes of attention workspace plus {} bytes of allocator headroom and {} bytes of safety headroom require {} additional device bytes, but only {} bytes are available ({} bytes already used in the CUDA pool)",
+            self.device, self.attention_workspace_bytes, self.allocator_headroom_bytes, self.safety_headroom_bytes,
+            self.additional_device_bytes, self.available_device_bytes, self.pool_used_bytes,
+        );
+        Ok(())
+    }
+}
+
+fn prompt_memory_budget(
+    device: String,
+    attention_workspace_bytes: usize,
+    snapshot: CudaAllocatorSnapshot,
+) -> anyhow::Result<CudaPromptMemoryBudget> {
+    let safety_headroom_bytes = PressureThresholds::from_snapshot(snapshot).base_free;
+    let cached = snapshot.async_pool.map_or(0, |pool| pool.current.cached());
+    // Allow a preceding workspace to remain cached or in flight while allocating the next one.
+    let allocator_headroom_bytes = attention_workspace_bytes;
+    let workspace_capacity = attention_workspace_bytes
+        .checked_add(allocator_headroom_bytes)
+        .ok_or_else(|| anyhow::anyhow!("CUDA prompt startup workspace overflow"))?;
+    let additional_device_bytes = workspace_capacity
+        .saturating_sub(cached)
+        .checked_add(safety_headroom_bytes)
+        .ok_or_else(|| anyhow::anyhow!("CUDA prompt startup budget overflow"))?;
+    Ok(CudaPromptMemoryBudget {
+        device,
+        pool_used_bytes: snapshot.async_pool.map_or(0, |pool| pool.current.used),
+        attention_workspace_bytes,
+        allocator_headroom_bytes,
+        safety_headroom_bytes,
+        additional_device_bytes,
+        available_device_bytes: snapshot.available,
+    })
+}
+
+pub(crate) fn validate_cuda_prompt_capacity(
+    pipeline: &dyn crate::Pipeline,
+    scheduler: &crate::SchedulerConfig,
+    max_context_tokens: usize,
+) -> anyhow::Result<Vec<CudaPromptMemoryBudget>> {
+    let crate::SchedulerConfig::PagedAttentionMeta {
+        max_num_seqs,
+        max_prefill_chunk_tokens,
+        config,
+        ..
+    } = scheduler
+    else {
+        anyhow::bail!("CUDA prompt capacity validation requires paged attention");
+    };
+    let metadata = pipeline.get_metadata();
+    anyhow::ensure!(
+        max_context_tokens > 0 && max_context_tokens <= metadata.max_seq_len,
+        "startup context {max_context_tokens} exceeds the loaded model limit {} or is zero",
+        metadata.max_seq_len
+    );
+    anyhow::ensure!(
+        *max_num_seqs > 0 && *max_prefill_chunk_tokens > 0,
+        "startup prompt capacity requires nonzero scheduler limits"
+    );
+    // Use a full chunk in every lane. This also bounds padding when a real
+    // batch has unequal query lengths or hits its aggregate token limit.
+    let queries = vec![max_context_tokens.min(*max_prefill_chunk_tokens); *max_num_seqs];
+    let contexts = vec![max_context_tokens; *max_num_seqs];
+    let devices = pipeline.execution_devices();
+    anyhow::ensure!(
+        !devices.is_empty() && devices.iter().all(Device::is_cuda),
+        "CUDA prompt capacity validation requires all execution devices to be CUDA"
+    );
+    let workspace = crate::paged_attention::plan::prompt_prefill_workspace(
+        metadata.model_metadata.as_deref(),
+        crate::paged_attention::plan::PromptPrefillWorkspaceInput {
+            activation_dtype: metadata.activation_dtype,
+            cache_dtype: config.cache_type.to_dtype(metadata.activation_dtype),
+            device_is_cuda: true,
+            block_size: config.block_size,
+            query_lens: &queries,
+            full_context_lens: &contexts,
+            max_pages_per_sequence: max_context_tokens.div_ceil(config.block_size),
+            requires_prefix_attention: true,
+            is_causal: true,
+            causality_known: true,
+            has_custom_mask: false,
+            has_noncausal_mm_context: false,
+            has_sliding_window: metadata.sliding_window.is_some(),
+            fa3_num_sm_by_layer: metadata
+                .cache_engine
+                .as_ref()
+                .map_or(&[], |engine| engine.fa3_prefill_num_sm_by_layer()),
+        },
+    )?;
+    devices
+        .iter()
+        .map(|device| {
+            MemoryUsage.synchronize_cuda_context(device)?;
+            let snapshot = MemoryUsage
+                .query_cuda_allocator(device)?
+                .ok_or_else(|| anyhow::anyhow!("missing CUDA allocator snapshot"))?;
+            let budget =
+                prompt_memory_budget(device.device_pretty_repr(), workspace.bytes, snapshot)?;
+            budget.validate()?;
+            Ok(budget)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PromptBatchMemoryAction {
     Proceed,
@@ -550,6 +671,35 @@ mod tests {
 
     const GIB: usize = 1024 * 1024 * 1024;
     const IDLE_TRIM_TEST_WARM_CACHE_MULTIPLIER: usize = 3;
+
+    #[test]
+    fn startup_budget_covers_profiled_pool_growth_and_rejects_insufficient_capacity() {
+        let mut memory = snapshot(13 * GIB, 5_570_035_712, 5_538_226_264);
+        memory.total = 19 * GIB;
+        // Windows Qwen3.5, 512 queries against a full 16k context, including
+        // gathered/expanded KV, mask, BF16 scores and the two F32 score buffers.
+        let workspace = 1684 * BYTES_PER_MIB;
+        let mut budget = prompt_memory_budget("test GPU".into(), workspace, memory).unwrap();
+        assert!(
+            memory.async_pool.unwrap().current.reserved + budget.additional_device_bytes
+                >= 8_489_271_296 + 64 * BYTES_PER_MIB,
+            "startup headroom must cover the measured pool peak and first-inference allocation"
+        );
+        budget.available_device_bytes = budget.additional_device_bytes;
+        budget.validate().unwrap();
+        budget.available_device_bytes -= 1;
+        assert!(budget.validate().unwrap_err().to_string().contains("only"));
+    }
+
+    #[test]
+    fn startup_budget_reuses_idle_pool_memory_but_preserves_free_device_headroom() {
+        let mut memory = snapshot(GIB, 9 * GIB, 5 * GIB);
+        memory.total = 19 * GIB;
+        let budget = prompt_memory_budget("test GPU".into(), 2 * GIB, memory).unwrap();
+        assert_eq!(budget.additional_device_bytes, BASE_FREE_MIN_BYTES);
+        budget.validate().unwrap();
+        assert!(prompt_memory_budget("test GPU".into(), usize::MAX, memory).is_err());
+    }
 
     fn snapshot(available: usize, reserved: usize, used: usize) -> CudaAllocatorSnapshot {
         CudaAllocatorSnapshot {

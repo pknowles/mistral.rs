@@ -189,3 +189,20 @@ If capture or replay fails, CUDA graphs are disabled for that loaded pipeline an
 CUDA graphs help most when decode is limited by CPU launch overhead or many small kernels. They are most useful with paged attention because the paged metadata gives the graph stable tensor shapes while the values inside those tensors change from step to step. They usually do little for prompt prefill, where larger matrix and attention kernels dominate.
 
 For apples-to-apples benchmarking, keep the same prompt length, generation length, batch size, paged-attention mode, and FlashInfer setting across runs.
+
+### Validate startup prompt headroom from Rust
+
+After loading a CUDA model, call
+`model.inner().validate_cuda_prompt_capacity(None, max_context_tokens).await?`
+before admitting requests. This uses the loaded attention implementation and
+scheduler limits to estimate workspace at full concurrency. The returned
+per-device budgets report current pool use, attention workspace, allocator
+headroom, safety headroom, additional required bytes and available device bytes.
+Insufficient capacity returns an error with the required and available sizes.
+
+Allocator headroom allows a preceding workspace to remain cached or in flight
+while another is allocated. The safety margin reuses CUDA memory maintenance's
+free-memory policy; already idle pool memory counts as reusable capacity.
+This is an estimate and availability check, not a physical reservation. It does
+not prevent other processes from consuming GPU memory later, and does not
+establish bounds for multimodal inputs or arbitrary non-attention model buffers.

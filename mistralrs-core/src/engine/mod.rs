@@ -69,6 +69,10 @@ mod cuda_decode;
 #[cfg(feature = "cuda")]
 mod cuda_memory;
 pub use agentic_loop::DEFAULT_MAX_TOOL_ROUNDS;
+#[cfg(feature = "cuda")]
+pub(crate) use cuda_memory::validate_cuda_prompt_capacity;
+#[cfg(feature = "cuda")]
+pub use cuda_memory::CudaPromptMemoryBudget;
 pub(crate) mod agentic_session;
 mod file_tools;
 mod logger;

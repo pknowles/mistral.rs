@@ -1,5 +1,7 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 use candle_core::Device;
+#[cfg(feature = "cuda")]
+pub use engine::CudaPromptMemoryBudget;
 use engine::Engine;
 pub use engine::{
     agentic_session::{AgenticSessionStore, SerializedSession, SerializedVideo},
@@ -2221,6 +2223,33 @@ impl MistralRs {
         } else {
             Err(MistralRsError::EnginePoisoned)
         }
+    }
+
+    /// Validate estimated prompt workspace at the scheduler's full concurrency.
+    /// Call before admitting traffic. This checks current capacity; it does not
+    /// reserve device memory or prevent other processes from consuming it later.
+    #[cfg(feature = "cuda")]
+    pub async fn validate_cuda_prompt_capacity(
+        &self,
+        model_id: Option<&str>,
+        max_context_tokens: usize,
+    ) -> anyhow::Result<Vec<CudaPromptMemoryBudget>> {
+        let id = self.resolve_alias_or_default(model_id)?;
+        let (pipeline, scheduler) = {
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| anyhow::anyhow!("failed to acquire engines for memory validation"))?;
+            let engine = engines
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("model {id} is not loaded"))?;
+            (
+                engine.reboot_state.pipeline.clone(),
+                engine.reboot_state.method.clone(),
+            )
+        };
+        let pipeline = pipeline.lock().await;
+        engine::validate_cuda_prompt_capacity(&*pipeline, &scheduler, max_context_tokens)
     }
 
     pub fn next_request_id(&self) -> usize {
