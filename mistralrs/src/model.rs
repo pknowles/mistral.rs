@@ -292,7 +292,7 @@ impl Model {
         let request = Request::Normal(Box::new(NormalRequest {
             messages,
             sampling_params: request.take_sampling_params(),
-            seed: None,
+            seed: request.seed(),
             response: tx,
             return_logprobs: request.return_logprobs(),
             is_streaming: true,
@@ -362,7 +362,7 @@ impl Model {
         let request = Request::Normal(Box::new(NormalRequest {
             messages,
             sampling_params: request.take_sampling_params(),
-            seed: None,
+            seed: request.seed(),
             response: tx,
             return_logprobs: request.return_logprobs(),
             is_streaming: false,
@@ -450,7 +450,7 @@ impl Model {
         let request = Request::Normal(Box::new(NormalRequest {
             messages,
             sampling_params: request.take_sampling_params(),
-            seed: None,
+            seed: request.seed(),
             response: tx,
             return_logprobs: request.return_logprobs(),
             is_streaming: false,

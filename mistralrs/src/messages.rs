@@ -16,6 +16,10 @@ use serde_json::{json, Value};
 ///
 /// Implemented by [`TextMessages`], [`MultimodalMessages`], and [`RequestBuilder`].
 pub trait RequestLike {
+    /// Seed for the sampler's random draws; `None` draws from entropy.
+    fn seed(&self) -> Option<u64> {
+        None
+    }
     fn take_prompt_observer(&mut self) -> Option<PromptObserver> {
         None
     }
@@ -597,6 +601,7 @@ pub struct RequestBuilder {
     files: Option<Vec<RequestedFile>>,
     input_files: Vec<File>,
     pending_prefixes: Vec<PendingMediaPrefix>,
+    seed: Option<u64>,
 }
 
 impl Default for RequestBuilder {
@@ -635,6 +640,7 @@ impl From<TextMessages> for RequestBuilder {
             files: None,
             input_files: Vec::new(),
             pending_prefixes: Vec::new(),
+            seed: None,
             prompt_observer: None,
         }
     }
@@ -670,6 +676,7 @@ impl From<MultimodalMessages> for RequestBuilder {
             files: None,
             input_files: Vec::new(),
             pending_prefixes: value.pending_prefixes,
+            seed: None,
             prompt_observer: None,
         }
     }
@@ -711,6 +718,7 @@ impl RequestBuilder {
             files: None,
             input_files: Vec::new(),
             pending_prefixes: Vec::new(),
+            seed: None,
             prompt_observer: None,
         }
     }
@@ -1075,6 +1083,12 @@ impl RequestBuilder {
         self
     }
 
+    /// Seed the sampler's random draws so the same request gives the same output.
+    pub fn set_sampler_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     /// Limit sampling to the top-k most probable tokens.
     pub fn set_sampler_topk(mut self, topk: usize) -> Self {
         self.sampling_params.top_k = Some(topk);
@@ -1208,6 +1222,9 @@ impl RequestBuilder {
 }
 
 impl RequestLike for RequestBuilder {
+    fn seed(&self) -> Option<u64> {
+        self.seed
+    }
     fn take_prompt_observer(&mut self) -> Option<PromptObserver> {
         self.prompt_observer.take()
     }
